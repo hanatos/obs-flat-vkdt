@@ -1,0 +1,134 @@
+#version 460
+#extension GL_GOOGLE_include_directive    : enable
+#extension GL_EXT_nonuniform_qualifier    : enable
+
+#include "shared.glsl"
+
+layout(local_size_x = DT_LOCAL_SIZE_X, local_size_y = DT_LOCAL_SIZE_Y, local_size_z = 1) in;
+
+layout(std140, set = 0, binding = 1) uniform params_t
+{
+  float white;
+  float desat;
+  float soft;
+} params;
+
+layout(push_constant, std140) uniform push_t
+{
+  vec4 wb;
+  uint filters;
+  uint level;
+} push;
+
+layout( // input f16 buffer, original input at fine level
+    set = 1, binding = 0
+) uniform sampler2D img_input;
+
+layout( // coarse f16 buffer
+    set = 1, binding = 1
+) uniform sampler2D img_coarse;
+
+layout( // output fine resolution
+    set = 1, binding = 2
+) uniform writeonly image2D img_out;
+
+
+vec3 gauss_expand(sampler2D img_in, ivec2 opos)
+{
+  vec3 c = vec3(0.0);
+  const float w[5] = {1.0/16.0, 4.0/16.0, 6.0/16.0, 4.0/16.0, 1.0/16.0};
+  const float white = params.white;
+  float wgt = 0.0;
+  ivec2 ipos = opos/2;
+  const int d = (opos.x&1) + 2*(opos.y&1);
+  if(d == 0)
+  { // both are even, 3x3 stencil
+    for(int ii=-1;ii<=1;ii++) for(int jj=-1;jj<=1;jj++)
+    {
+      vec3 rgb = texture(img_in, vec2(ipos+ivec2(ii,jj)+0.5)/textureSize(img_in, 0)).rgb;
+      // if(all(lessThan(rgb, vec3(white))))
+      {
+        c += rgb * w[2*jj+2]*w[2*ii+2];
+        wgt += w[2*jj+2]*w[2*ii+2];
+      }
+    }
+  }
+  else if(d == 1)
+  { // i is odd, 2x3 stencil
+    for(int ii=0;ii<=1;ii++) for(int jj=-1;jj<=1;jj++)
+    {
+      vec3 rgb = texture(img_in, vec2(ipos+ivec2(ii,jj)+0.5)/textureSize(img_in, 0)).rgb;
+      // if(all(lessThan(rgb, vec3(white))))
+      {
+        c += rgb * w[2*jj+2]*w[2*ii+1];
+        wgt += w[2*jj+2]*w[2*ii+1];
+      }
+    }
+  }
+  else if(d == 2)
+  { // j is odd, 3x2 stencil
+    for(int ii=-1;ii<=1;ii++) for(int jj=0;jj<=1;jj++)
+    {
+      vec3 rgb = texture(img_in, vec2(ipos+ivec2(ii,jj)+0.5)/textureSize(img_in, 0)).rgb;
+      // if(all(lessThan(rgb, vec3(white))))
+      {
+        c += rgb * w[2*jj+1]*w[2*ii+2];
+        wgt += w[2*jj+1]*w[2*ii+2];
+      }
+    }
+  }
+  else // d == 3
+  { // both are odd, 2x2 stencil
+    for(int ii=0;ii<=1;ii++) for(int jj=0;jj<=1;jj++)
+    {
+      vec3 rgb = texture(img_in, vec2(ipos+ivec2(ii,jj)+0.5)/textureSize(img_in, 0)).rgb;
+      // if(all(lessThan(rgb, vec3(white))))
+      {
+        c += rgb * w[2*jj+1]*w[2*ii+1];
+        wgt += w[2*jj+1]*w[2*ii+1];
+      }
+    }
+  }
+  if(wgt == 0.0) return vec3(0, 1, 1); // white?
+  return c / wgt;
+}
+
+// assemble
+void
+main()
+{
+  ivec2 opos = ivec2(gl_GlobalInvocationID);
+  if(any(greaterThanEqual(opos, imageSize(img_out)))) return;
+
+  // upsample img_coarse
+  vec3 upsm = gauss_expand(img_coarse, opos);
+  // fetch input pixel
+  vec4 fine = texelFetch(img_input, opos, 0);
+
+  const float white = params.white;
+
+#if 1
+  // rescale upsampled values to match unclipped values in fine buffer
+  // this is risky because min might be close to black/0 so it may be unstable:
+  // guess channel by darkest blurry version
+  float sr = fine.r/max(0.001, upsm.r);
+  float sg = fine.g/max(0.001, upsm.g);
+  float sb = fine.b/max(0.001, upsm.b);
+  float wr = exp(upsm.r - max(upsm.g, upsm.b));
+  float wg = exp(upsm.g - max(upsm.r, upsm.b));
+  float wb = exp(upsm.b - max(upsm.r, upsm.g));
+  float scale = (sr * wr + sg * wg + sb * wb) / (wr + wg + wb);
+
+  vec3 rec = upsm * scale;
+  float t = params.soft;
+  // float t = clamp(1.4*params.soft-0.3*length(fine-rec), 0, 1);
+  if(any(greaterThanEqual(fine.rgb, vec3(white)))) t = 1.0;
+  t = clamp(mix(t, 1.0, sqrt(fine.a)), 0.0, 1.0);
+  fine.rgb = mix(fine.rgb, rec, t);
+#else
+  if(any(greaterThanEqual(fine.rgb, vec3(white))))
+    fine.rgb = upsm; // XXX DEBUG
+#endif
+  imageStore(img_out, opos, vec4(fine.rgb, 1));
+}
+

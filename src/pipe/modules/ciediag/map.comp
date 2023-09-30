@@ -1,0 +1,82 @@
+#version 460
+#extension GL_GOOGLE_include_directive    : enable
+#extension GL_EXT_nonuniform_qualifier    : enable
+
+#include "shared.glsl"
+
+layout(local_size_x = DT_LOCAL_SIZE_X, local_size_y = DT_LOCAL_SIZE_Y, local_size_z = 1) in;
+
+layout(std140, set = 0, binding = 1) uniform params_t
+{
+  int nspots;
+  int pad0, pad1, pad2;
+  vec4 ref[18];
+} params;
+
+layout(set = 1, binding = 0) uniform usampler2D img_in;
+layout(set = 1, binding = 1) uniform writeonly image2D img_out;
+
+// display histogram, runs on output dimensions==input
+void
+main()
+{
+  ivec2 ipos = ivec2(gl_GlobalInvocationID);
+  if(any(greaterThanEqual(ipos, imageSize(img_out)))) return;
+
+  uint cnt = texelFetch(img_in, ipos, 0).r;
+  vec3 rgb = vec3(cnt/100.0);
+  vec2 xy = ipos.xy / vec2(imageSize(img_out));
+  xy.y = 1.0-xy.y;
+  // draw anti aliased lines through illum E and the tangent at the red/orange side for orientation
+  const float t = 0.004;
+  float d;
+
+  // illum E
+  if(all(lessThan(abs(xy - vec2(0.3333, 0.3333)), vec2(0.05))))
+  {
+    d = abs(xy.x - 0.3333);
+    rgb.r = max(rgb.r, 0.9 * smoothstep(t, 0.0, d));
+    d = abs(xy.y - 0.3333);
+    rgb.r = max(rgb.r, 0.9 * smoothstep(t, 0.0, d));
+  }
+
+  const mat3 xyz_to_rec2020 = mat3(
+      1.7166511880, -0.6666843518, 0.0176398574, 
+      -0.3556707838, 1.6164812366, -0.0427706133, 
+      -0.2533662814, 0.0157685458, 0.9421031212);
+  const mat3 xyz_to_rec709 = mat3(
+      3.2404542, -0.9692660, 0.0556434, 
+      -1.5371385, 1.8760108, -0.2040259,
+      -0.4985314, 0.0415560, 1.0572252);
+
+  // draw approximate spectral locus bounds:
+  if(outside_spectral_locus(xy))
+    rgb = max(rgb, vec3(.1, .1, .1));
+
+  vec3 xyz = vec3(xy, 1.0-xy.x-xy.y);
+  if(all(greaterThan(xyz_to_rec2020 * xyz, vec3(0.0)))) rgb = max(rgb, vec3(0.01));
+  if(all(greaterThan(xyz_to_rec709  * xyz, vec3(0.0)))) rgb = max(rgb, vec3(0.03));
+
+  if(xy.x <= 0.65 && xy.x >= 0.25)
+  { // planckian locus, manual fit
+    const vec4 cf = vec4(0.157127, -3.10907, 2.95381, -0.300549);
+    const float y = cf.x*xy.x*xy.x*xy.x + cf.y*xy.x*xy.x + cf.z*xy.x + cf.w;
+    d = abs(xy.y - y);
+    rgb.g = max(rgb.g, 0.9 * smoothstep(t, 0.0, d));
+  }
+
+  for(int i=0;i<params.nspots;i++)
+  { // reference spots, same format as colour picker
+    vec3 pp = inverse(xyz_to_rec2020)*vec3(
+          params.ref[(3*i+0)/4][(3*i+0)%4],
+          params.ref[(3*i+1)/4][(3*i+1)%4],
+          params.ref[(3*i+2)/4][(3*i+2)%4]);
+    vec2 p = pp.xy / dot(pp, vec3(1));
+    d = distance(xy, p);
+    rgb.r = max(rgb.r, 0.9 * smoothstep(3*t, 0.0, d));
+    rgb.g = max(rgb.g, 0.9 * smoothstep(3*t, 0.0, d));
+  }
+
+  imageStore(img_out, ipos, vec4(rgb, 1.0));
+}
+

@@ -1,0 +1,110 @@
+#version 460
+#extension GL_GOOGLE_include_directive    : enable
+#extension GL_EXT_nonuniform_qualifier    : enable
+
+#include "shared.glsl"
+
+layout(local_size_x = DT_LOCAL_SIZE_X, local_size_y = DT_LOCAL_SIZE_Y, local_size_z = 1) in;
+
+layout(std140, set = 0, binding = 1) uniform params_t
+{
+  float strength;
+  float luma;
+} params;
+
+layout(push_constant, std140) uniform push_t
+{
+  vec4 wb;
+  vec4 black;
+  vec4 white;
+  ivec4 crop;
+  uint filters;
+  float noise_a;
+  float noise_b;
+} push;
+
+layout( // input uint16 buffer rggb
+    set = 1, binding = 0
+) uniform sampler2D img_in;
+
+layout( // denoised coarse buffer
+    set = 1, binding = 1
+) uniform sampler2D img_crs0;
+
+layout( // noisy coarse buffer from input
+    set = 1, binding = 2
+) uniform sampler2D img_crs1;
+
+layout( // output f16 buffer
+    set = 1, binding = 3
+) uniform writeonly image2D img_out;
+
+// do one scale of decimated wavelet denoising on full res mosaic
+void
+main()
+{
+  ivec2 ipos = ivec2(gl_GlobalInvocationID);
+  if(any(greaterThanEqual(ipos, imageSize(img_out)))) return;
+
+  // get denoised and noisy coarse buffer by bilinear interpolation
+  vec4 upsm = texture(img_crs0, (ipos+0.5)/vec2(imageSize(img_out)));
+  vec4 down = texture(img_crs1, (ipos+0.5)/vec2(imageSize(img_out)));
+
+  // find colour channel for this pixel and init some variables for that:
+  float black = push.black.g, white = push.white.g, crs = upsm.g, crs1 = down.g,
+        T = 0.5 * params.strength*upsm.w, blendw = params.luma;
+  if(push.filters == 9)
+  { // xtrans
+    bool blue_top = ((ipos.x/3 + ipos.y/3) & 1) > 0;
+    ivec2 pos = ipos - (ipos/3)*3;
+    if(((pos.x + pos.y) & 1) == 0)
+    { }
+    else if(blue_top ^^ (pos.y == 1))
+    {
+      black = push.black.b; white = push.white.b;
+      crs = upsm.b; crs1 = down.b; blendw = 1.0;
+      T /= max(1e-4, upsm.w);
+    }
+    else
+    {
+      black = push.black.r; white = push.white.r;
+      crs = upsm.r; crs1 = down.r; blendw = 1.0;
+      T /= max(1e-4, upsm.w);
+    }
+  }
+  else
+  { // bayer
+    if((((ipos.x & 1) == 0) && ((ipos.y & 1) == 1)) ||
+       (((ipos.x & 1) == 1) && ((ipos.y & 1) == 0)))
+    { }
+    else if(((ipos.x & 1) == 0) && ((ipos.y & 1) == 0))
+    { // red
+      black = push.black.r; white = push.white.r;
+      crs = upsm.r; crs1 = down.r; blendw = 1.0;
+      // T /= upsm.w;
+    }
+    else if(((ipos.x & 1) == 1) && ((ipos.y & 1) == 1))
+    { // blue
+      black = push.black.b; white = push.white.b;
+      crs = upsm.b; crs1 = down.b; blendw = 1.0;
+      // T /= upsm.w;
+    }
+  }
+  const float scale = 65535.0;
+  const float sigma = 10.0*sqrt(push.noise_a + scale*max(crs, 0.0)*push.noise_b)/scale;
+  float val = texture(img_in, (ipos+push.crop.xy+.5)/vec2(textureSize(img_in, 0))).r;
+
+  blendw = 0.5 * (blendw + 1.0);
+  // T = 0.0;// * upsm.w; // XXX
+  if(val < white)
+  {
+    float wav = (val - crs1)/max(sigma, 1e-8);
+    // const float ht = 2.0; // attempt to remove fireflies
+    // if(abs(wav) > ht) T = 10000.0;
+    float tt = min(1.0, wav/max(2.0*T,1e-8));
+    val = mix(val, max(0, mix(crs1, crs, upsm.w) + sigma * sign(wav) * mix(max(0.0, abs(wav) - T), abs(wav), tt)), blendw);
+  }
+  val  = max(0, (val  - black)/(white - black));
+  // val = upsm.w; // XXX DEBUG see detail shielding
+  imageStore(img_out, ipos, vec4(vec3(val), 1.0));
+}

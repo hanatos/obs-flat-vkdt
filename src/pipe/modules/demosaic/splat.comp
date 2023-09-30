@@ -1,0 +1,155 @@
+#version 460
+#extension GL_GOOGLE_include_directive    : enable
+#extension GL_EXT_nonuniform_qualifier    : enable
+
+#include "shared.glsl"
+
+layout(local_size_x = DT_LOCAL_SIZE_X, local_size_y = DT_LOCAL_SIZE_Y, local_size_z = 1) in;
+
+// layout(std140, set = 0, binding = 1) uniform params_t
+// { } params;
+
+layout(push_constant, std140) uniform push_t
+{
+  uint filters;
+} push;
+
+
+layout( // input buffer rggb
+    set = 1, binding = 0
+) uniform sampler2D img_in;
+
+layout( // input buffer rgb gaussian covariance
+    set = 1, binding = 1
+) uniform sampler2D img_gauss;
+
+layout( // output buffer green channel
+    set = 1, binding = 2
+) uniform writeonly image2D img_out;
+
+void
+eval_gauss(
+    vec4 cov, ivec2 o,
+    out float col,
+    out float weight)
+{
+  ivec2 opos = ivec2(gl_GlobalInvocationID);
+  ivec2 pos = opos+o;
+  // now unfortunately mirror repeat fucks up the pattern and results in visibly wrong colours
+  // in the last half block near the borders of the image. we'll manually adjust pos then :(
+  // this is way broken for bayer (3x the needed offset), and somewhat weird for xtrans.
+  if(pos.x < 0) pos.x += 6;
+  if(pos.y < 0) pos.y += 6;
+  if(pos.x >= textureSize(img_in, 0).x) pos.x -= 6;
+  if(pos.y >= textureSize(img_in, 0).y) pos.y -= 6;
+  col = texelFetch(img_in, pos, 0).r;
+
+  vec2 eval = clamp(cov.xy, 0.01, 25); // the lower bound has direct impact on sharpness
+  mat2 E = mat2(cov.z, -cov.w,
+                cov.w,  cov.z);
+  vec2 of = E * o;
+  weight = clamp(exp(-0.5*dot(of/eval, of)), 1e-4, 1.0);
+  if(o.x == 0 && o.y == 0) weight = 666.0; // more sharpness, but prone to zippering
+}
+
+void write_xtrans(
+    ivec2 o,
+    float col,
+    float weight,
+    inout vec3 rgb,
+    inout vec3 w)
+{
+  // add safety margin that spans both 2x2 bayer and 6x6 xtrans blocks so
+  // modulo etc will always work on positive numbers:
+  ivec2 pos = ivec2(gl_GlobalInvocationID)+o+ivec2(6);
+  // rgb from pattern:
+  bool blue_top = ((pos.x/3 + pos.y/3) & 1) > 0;
+  pos = pos - (pos/3)*3;
+  if(((pos.x + pos.y) & 1) == 0)
+  {
+    rgb.g += col * weight;
+    w.g += weight;
+  }
+  else if(blue_top ^^ (pos.y == 1))
+  {
+    rgb.b += col * weight;
+    w.b += weight;
+  }
+  else
+  {
+    rgb.r += col * weight;
+    w.r += weight;
+  }
+}
+
+void write_bayer(
+    ivec2 o,
+    float col,
+    float weight,
+    inout vec3 rgb,
+    inout vec3 w)
+{
+  ivec2 pos = ivec2(gl_GlobalInvocationID)+o;
+  col *= weight;
+  if((((pos.x & 1) == 0) && ((pos.y & 1) == 1)) ||
+     (((pos.x & 1) == 1) && ((pos.y & 1) == 0)))
+  { // green
+    rgb.g += col;
+    w.g += weight;
+  }
+  else if(((pos.x & 1) == 0) && ((pos.y & 1) == 0))
+  { // red
+    rgb.r += col;
+    w.r += weight;
+  }
+  else if(((pos.x & 1) == 1) && ((pos.y & 1) == 1))
+  { // blue
+    rgb.b += col;
+    w.b += weight;
+  }
+}
+
+void
+main()
+{
+  ivec2 opos = ivec2(gl_GlobalInvocationID);
+  if(any(greaterThanEqual(opos, imageSize(img_out)))) return;
+
+  // x trans looks like:
+  // . r . . b .
+  // b . b r . r
+  // . r . . b .
+  // . b . . r .
+  // r . r b . b
+  // . b . . r .
+  // so green needs a splat radius of 1, blue/red need 2
+  // bayer looks like:
+  // r .
+  // . b
+  vec3 rgb = vec3(0.0);
+  vec3 w   = vec3(0.0);
+
+  if(push.filters == 9)
+  { // x-trans
+    vec4 cov = texelFetch(img_gauss, opos/3, 0);
+    for(int j=-2;j<=2;j++) for(int i=-2;i<=2;i++)
+    {
+      float col, weight;
+      eval_gauss(cov, ivec2(i, j), col, weight);
+      write_xtrans(ivec2(i, j), col, weight, rgb, w);
+    }
+  }
+  else
+  { // bayer
+    vec4 cov = texelFetch(img_gauss, (opos+1)/2, 0);
+    for(int j=-1;j<=1;j++) for(int i=-1;i<=1;i++)
+    {
+      float col, weight;
+      eval_gauss(cov, ivec2(i, j), col, weight);
+      write_bayer(ivec2(i, j), col, weight, rgb, w);
+    }
+  }
+
+  rgb /= max(vec3(1e-8), w);
+  imageStore(img_out, opos, vec4(rgb.ggg, 1.0));
+}

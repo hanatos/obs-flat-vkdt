@@ -1,0 +1,112 @@
+#version 460
+#extension GL_GOOGLE_include_directive    : enable
+#extension GL_EXT_nonuniform_qualifier    : enable
+#include "shared.glsl"
+#include "config.h"
+
+// these are usually fixed at 8 (defined in localsize.h and included here and on cpu side)
+// we definitely want more than that now. ingo says he needs like 5px boundary in practice :(
+layout(local_size_x = DT_DECONV_TILE_WD, local_size_y = DT_DECONV_TILE_HT, local_size_z = 1) in;
+
+layout(std140, set = 0, binding = 1) uniform params_t
+{
+  float sigma;
+  uint  iter_cnt;
+} params;
+
+layout(set = 1, binding = 0) uniform sampler2D img_in;
+layout(set = 1, binding = 1) uniform writeonly image2D img_out;
+
+// making this not square but off by one (to reduce bank conflicts in the y pass)
+// reduces run time from 8.5 to 8.3ms
+shared vec3 curr[(DT_DECONV_TILE_WD+1)*DT_DECONV_TILE_HT];
+
+// we are running on input tiles + border:
+// * someone needs to remember not to write to output
+// * ipos == opos == complicated(invocation_id)
+// * need to mask out all blur loops for borders
+// * need to run more threads (but we have plenty)
+void
+main()
+{
+  ivec2 ipos =
+    ivec2(gl_WorkGroupID.xy * ivec2(
+        DT_DECONV_TILE_WD-2*DT_DECONV_BORDER,
+        DT_DECONV_TILE_HT-2*DT_DECONV_BORDER));
+  // if start of tile is out of image we have nothing to do:
+  if(any(greaterThanEqual(ipos, imageSize(img_out)))) return;
+  ipos += ivec2(gl_LocalInvocationID.xy) - ivec2(DT_DECONV_BORDER, DT_DECONV_BORDER); // add offset within the tile
+
+  // everybody get their texels:
+  const uint idx = gl_LocalInvocationID.x + (gl_WorkGroupSize.x+1) * gl_LocalInvocationID.y;
+  vec3 orig; // remember original pixel colour
+  curr[idx] = orig = max(vec3(0.0), texelFetch(img_in, clamp(ipos, ivec2(0), textureSize(img_in, 0)-1), 0).rgb);
+
+  const float w = exp(-1/(2.0*params.sigma*params.sigma));
+
+  // do the iterations
+  for(int i=0;i<params.iter_cnt;i++)
+  // hardcoded 10 iterations does not really give a conclusive speedup
+  // #pragma optionNV (unroll all)
+  // for(int i=0;i<10;i++)
+  {
+    // I(i+1) = I(i) * ( K' x (input / (I(i) x K)) )
+    // remember I(i) locally
+    barrier();
+    const vec3 I_i = curr[idx];
+    vec3 cm = I_i, cM = I_i;
+    // compute the gaussian blur of the input, I(i) x K and store the result locally
+    vec3 res;
+    // going from blur to separable two pass blur means 9.5 -> 8.5ms
+#define BLURH {\
+    const uint x0 = max(int(gl_LocalInvocationID.x) - 1, 0);\
+    const uint x1 = gl_LocalInvocationID.x;\
+    const uint x2 = min(gl_LocalInvocationID.x + 1, gl_WorkGroupSize.x-1);\
+    res = vec3(0.0);\
+    const uint y = (gl_WorkGroupSize.x+1) * gl_LocalInvocationID.y;\
+    res += curr[x0 + y] * w;\
+    res += curr[x1 + y];\
+    res += curr[x2 + y] * w;\
+    cm = min(min(cm, curr[x0+y]), min(curr[x1+y], curr[x2+y]));\
+    cM = max(max(cM, curr[x0+y]), max(curr[x1+y], curr[x2+y]));\
+    barrier();\
+    }
+#define BLURV {\
+    const uint y0 = (gl_WorkGroupSize.x+1) * max(int(gl_LocalInvocationID.y) - 1, 0);\
+    const uint y1 = (gl_WorkGroupSize.x+1) * gl_LocalInvocationID.y;\
+    const uint y2 = (gl_WorkGroupSize.x+1) * min(gl_LocalInvocationID.y + 1, gl_WorkGroupSize.y-1);\
+    res = vec3(0.0);\
+    const uint x = gl_LocalInvocationID.x;\
+    res += curr[x + y0] * w;\
+    res += curr[x + y1];\
+    res += curr[x + y2] * w;\
+    cm = min(min(cm, curr[x+y0]), min(curr[x+y1], curr[x+y2]));\
+    cM = max(max(cM, curr[x+y0]), max(curr[x+y1], curr[x+y2]));\
+    barrier();\
+    }
+
+    BLURH
+    curr[idx] = res;
+    barrier();
+    BLURV
+
+    curr[idx] = orig / max(vec3(1e-4), res);
+    barrier();
+
+    // compute convolution by adjoint
+    BLURH
+    curr[idx] = res;
+    barrier();
+    BLURV
+
+    // multiply and write back
+    curr[idx] = clamp(I_i * res, cm, cM);
+  }
+
+  barrier();
+  // write back to output texture
+  if(all(greaterThanEqual(gl_LocalInvocationID.xy, uvec2(DT_DECONV_BORDER))) &&
+     all(lessThan(gl_LocalInvocationID.xy, uvec2(DT_DECONV_TILE_WD-DT_DECONV_BORDER, DT_DECONV_TILE_HT-DT_DECONV_BORDER))) &&
+     all(lessThan(ipos, imageSize(img_out))))
+    imageStore(img_out, ipos, vec4(curr[idx], 1));
+}

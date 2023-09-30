@@ -1,0 +1,35 @@
+#version 460
+#extension GL_GOOGLE_include_directive    : enable
+#extension GL_EXT_nonuniform_qualifier    : enable
+#include "shared.glsl"
+
+layout(local_size_x = DT_LOCAL_SIZE_X, local_size_y = DT_LOCAL_SIZE_Y, local_size_z = 1) in;
+
+layout( // input buffer array
+    set = 1, binding = 0
+) uniform sampler2D img_in[];
+
+layout( // output buffer array
+    set = 1, binding = 1
+) uniform writeonly image2D img_out[];
+
+void
+main()
+{
+  ivec2 opos = ivec2(gl_GlobalInvocationID);
+  int idx = int(gl_GlobalInvocationID.z);
+  if(any(greaterThanEqual(opos, imageSize(img_out[idx])))) return;
+
+#if 0 // use texture unit/interpolation:
+  vec4 rgb = sample_flower(img_in[idx], (opos+0.5)/imageSize(img_out[idx]));
+#else // plain a-trous access
+  vec4 rgb = vec4(0.0);
+  const float w[5] = {1./16., 4./16., 6./16., 4./16., 1./16.};
+  for(int j=-2;j<=2;j++) for(int i=-2;i<=2;i++)
+    // rgb += w[j+2]*w[i+2]*texture(img_in[idx], (opos+0.5+vec2(j,i))/imageSize(img_out[idx]));
+    rgb += w[j+2]*w[i+2]*texture(img_in[idx],
+        (opos+0.5)/vec2(imageSize(img_out[idx])) + vec2(i,j)/vec2(textureSize(img_in[idx], 0)));
+#endif
+  imageStore(img_out[idx], opos, rgb);
+}
+

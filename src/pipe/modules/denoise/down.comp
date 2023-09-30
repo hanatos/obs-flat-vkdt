@@ -1,0 +1,103 @@
+#version 460
+#extension GL_GOOGLE_include_directive    : enable
+#extension GL_EXT_nonuniform_qualifier    : enable
+
+#include "shared.glsl"
+#include "cov.glsl"
+
+layout(local_size_x = DT_LOCAL_SIZE_X, local_size_y = DT_LOCAL_SIZE_Y, local_size_z = 1) in;
+
+layout(std140, set = 0, binding = 1) uniform params_t
+{
+  float strength;
+  float luma;
+} params;
+
+layout(push_constant, std140) uniform push_t
+{
+  vec4 wb;
+  vec4 black;
+  vec4 white;
+  ivec4 crop;
+  float noise_a;
+  float noise_b;
+  int   level;
+  uint  block;
+} push;
+
+layout( // input
+    set = 1, binding = 0
+) uniform sampler2D img_in;
+
+layout( // output
+    set = 1, binding = 1
+) uniform writeonly image2D img_out;
+
+vec3 gamma(vec3 f)
+{
+  return vec3(
+      f.x < 0.0 ? f.x : pow(f.x, 0.8),
+      f.y < 0.0 ? f.y : pow(f.y, 0.8),
+      f.z < 0.0 ? f.z : pow(f.z, 0.8));
+}
+
+
+float edge(vec3 s, vec3 c0, vec3 c1)
+{
+    /* float w = exp(-dot(wc*(col-rgb),wc*(col-rgb))) * (1.0-t)/4.0; */ \
+    /* float w = exp(-dot(wc*abs(col-rgb),vec3(1.0))) * (1.0-t)/4.0; */ \
+  // return exp(-dot(s*abs(gamma(c0)-gamma(c1)),vec3(1.0)));
+  return clamp(1.0-0.5*dot(s*abs(gamma(c0)-gamma(c1)), vec3(1.0)), 0.0, 1.0);
+}
+
+void
+main()
+{
+  ivec2 ipos = ivec2(gl_GlobalInvocationID);
+  if(any(greaterThanEqual(ipos, imageSize(img_out)))) return;
+
+  ivec2 sz = textureSize(img_in, 0).xy;
+
+  // 5 tap flower filter
+  // const float t = 36.0/256.0; // preserve weight of center pixel, we're leaving away 8 samples in the boundary of the support.
+  // const float t = 0.3; // a bit sharper
+  const float t = 0.2;
+  vec3 rgb;
+  if(push.level < 0) // TODO: detect based on xtrans/bayer and noise level
+  {
+    vec4 cov; // ignore
+    rgb = response(img_in, ipos + push.crop.xy, cov, push.level);
+  }
+  else
+  {
+    rgb = texture(img_in, (ipos + 0.5 + push.crop.xy)/vec2(sz)).rgb;
+    vec3 sum = t * rgb;
+    float wgt = t;
+    // const float scale = /*push.level == 0 ? 1.0 : */ 65535.0*(push.white.g-push.black.g);
+    const float scale = 65535.0;
+    const float block = (push.block == 3) ? 2.23607 : (push.block == 2 ? 1.414213 : 1.0);
+
+    const float sigma = pow(0.7, push.level) * 4.0 * sqrt(push.noise_a + scale*max(rgb.x, 0.0)*push.noise_b)/scale / block;
+    vec3 wc = vec3(1./sigma);
+#define lookup(O) \
+    do { \
+    vec3 col = texture(img_in, (ipos + push.crop.xy + O)/vec2(sz)).rgb; \
+    float w = edge(wc, col, rgb) * (1.0-t)/4.0; \
+    sum += w * col; \
+    wgt += w; \
+    } while(false)
+    lookup(vec2(0.5 + 1.2, 0.5 + 0.4));
+    lookup(vec2(0.5 - 1.2, 0.5 - 0.4));
+    lookup(vec2(0.5 + 0.4, 0.5 - 1.2));
+    lookup(vec2(0.5 - 0.4, 0.5 + 1.2));
+    rgb = sum / wgt;
+#undef lookup
+  }
+
+  // sort image to write positions so we can iterate the filter
+  ivec2 off = ivec2(ipos.x & 1, ipos.y & 1) * (imageSize(img_out)+ivec2(1))/2;
+  ipos = ipos / 2 + off;
+
+  // TODO: consider 2px padding radius for next iteration and mirror repeat!
+  imageStore(img_out, ipos, vec4(rgb, 1));
+}

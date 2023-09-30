@@ -1,0 +1,43 @@
+#version 460
+#extension GL_GOOGLE_include_directive    : enable
+#extension GL_EXT_nonuniform_qualifier    : enable
+
+#include "shared.glsl"
+
+layout(local_size_x = DT_LOCAL_SIZE_X, local_size_y = DT_LOCAL_SIZE_Y, local_size_z = 1) in;
+
+layout(std140, set = 0, binding = 1) uniform params_t
+{
+  float radius;
+  float epsilon;
+} params;
+
+
+layout( // input mean_I mean_p corr_I corr_Ip
+    set = 1, binding = 0
+) uniform sampler2D img_in;
+
+layout( // output f16 buffer ab
+    set = 1, binding = 1
+) uniform writeonly image2D img_out;
+
+void
+main()
+{
+  ivec2 ipos = ivec2(gl_GlobalInvocationID);
+  if(any(greaterThanEqual(ipos, imageSize(img_out)))) return;
+
+  // const vec4 mean_corr = texelFetch(img_in, ipos, 0);
+  const vec4 mean_corr = texture(img_in, (ipos + 0.5)/vec2(imageSize(img_out)));
+  // to make this really smooth, would need to consider pixel size in subsampled input blur buffer:
+  // const vec4 mean_corr = sample_semisoft(img_in, (ipos + 0.5)/vec2(imageSize(img_out)));
+  const float var = mean_corr.z - mean_corr.x * mean_corr.x;
+  const float cov = mean_corr.w - mean_corr.x * mean_corr.y;
+  // XXX what's the valid range here?
+  // const float a = clamp(cov / (var + 100*cov*params.epsilon), 0.0f, 1.0f);
+  const float a = clamp(cov / (var + 1e-8 + params.epsilon*params.epsilon), -1e5, 1e5); // some safety margin to avoid infty etc
+  // const float a = cov / (var + params.epsilon*params.epsilon);
+  const float b = mean_corr.y - a * mean_corr.x;
+  imageStore(img_out, ipos, vec4(a, b, 0.0, 0.0));
+}
+

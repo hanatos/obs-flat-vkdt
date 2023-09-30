@@ -1,0 +1,1 @@
+#define DT_ALIGN_NO_QUADRIC

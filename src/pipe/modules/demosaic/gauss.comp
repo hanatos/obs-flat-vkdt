@@ -1,0 +1,138 @@
+#version 460
+#extension GL_GOOGLE_include_directive    : enable
+#extension GL_EXT_nonuniform_qualifier    : enable
+
+#include "shared.glsl"
+
+layout(local_size_x = DT_LOCAL_SIZE_X, local_size_y = DT_LOCAL_SIZE_Y, local_size_z = 1) in;
+
+layout(push_constant, std140) uniform push_t
+{
+  uint filters;
+} push;
+
+
+layout( // input f16 buffer y
+    set = 1, binding = 0
+) uniform sampler2D img_in;
+
+layout( // input rggb original
+    set = 1, binding = 1
+) uniform sampler2D img_orig;
+
+layout( // output f16 buffer rgb
+    set = 1, binding = 2
+) uniform writeonly image2D img_out;
+
+
+// compute some anisotropic gaussian approximation to
+// the local structure of the green channel
+void
+main()
+{
+  ivec2 ipos = ivec2(gl_GlobalInvocationID);
+  if(any(greaterThanEqual(ipos, imageSize(img_out)))) return;
+
+  if(push.filters != 9)
+  { // bayer
+    mat2 Sw = mat2(0,0,0,0);
+    mat2 Sb = mat2(0,0,0,0);
+    float sw = 0.0, sb = 0.0;
+    vec2 mw = vec2(0.0), mb = vec2(0.0);
+    float smw = 0.0, smb = 0.0, mean_b = 0.0;
+    for(int j=-1;j<3;j++) for(int i=-1;i<3;i++)
+    {
+      if(((j+i) & 1) != 1) continue;
+      float px = texture(img_orig, (2*ipos + 0.5 + vec2(i,j))/vec2(textureSize(img_orig, 0))).r;
+      vec2 p = vec2(i, j);
+      mw += p*px;
+      smw += px;
+      mb += p/px;
+      smb += 1.0/px;
+    }
+    mw /= smw;
+    mb /= smb;
+
+    for(int j=-1;j<3;j++) for(int i=-1;i<3;i++)
+    {
+      if(((j+i) & 1) != 1) continue;
+      float px = texture(img_orig, (2*ipos + 0.5 + vec2(i,j))/vec2(textureSize(img_orig, 0))).r;
+      float p2 = px * px;
+      vec2 p = vec2(i, j) - mw;
+      Sw[0][0] += p2 * p.x * p.x;
+      Sw[0][1] += p2 * p.x * p.y;
+      Sw[1][0] += p2 * p.y * p.x;
+      Sw[1][1] += p2 * p.y * p.y;
+      sw += p2;
+      p = vec2(i, j) - mb;
+      p2 = 1.0/p2;
+      Sb[0][0] += p2 * p.x * p.x;
+      Sb[0][1] += p2 * p.x * p.y;
+      Sb[1][0] += p2 * p.y * p.x;
+      Sb[1][1] += p2 * p.y * p.y;
+      sb += p2;
+    }
+    Sw /= sw;
+    Sb /= sb;
+    mat2 S = determinant(Sw) < determinant(Sb) ? Sw : Sb;
+    vec2 eval, evec0, evec1;
+    evd2x2(eval, evec0, evec1, S);
+    eval *= 0.2;
+    // unfortunately bayer is not capable of more angles than that.
+    // trying more causes zippering. we might be able to extract here,
+    // but we can't interpolate more than either h or v.
+    if(abs(evec0.x) > abs(evec0.y)) evec0 = vec2(1, 0);
+    else                            evec0 = vec2(0, 1);
+    imageStore(img_out, ipos, vec4(eval, evec0));
+  }
+  else
+  { // xtrans
+    mat2 Sw = mat2(0,0,0,0);
+    mat2 Sb = mat2(0,0,0,0);
+    float sw = 0.0, sb = 0.0;
+    vec2 mw = vec2(0.0), mb = vec2(0.0);
+    float smw = 0.0, smb = 0.0, mean_b = 0.0;
+    for(int j=0;j<3;j++) for(int i=0;i<3;i++)
+    {
+      if(((j+i) & 1) == 1) continue;
+      float px = texture(img_orig, (3*ipos + 0.5 + vec2(i,j))/vec2(textureSize(img_orig, 0))).r;
+      vec2 p = vec2(i, j);
+      mw += p*px;
+      smw += px;
+      mb += p/px;
+      smb += 1.0/px;
+    }
+    mw /= smw;
+    mb /= smb;
+
+    for(int j=0;j<3;j++) for(int i=0;i<3;i++)
+    {
+      if(((j+i) & 1) == 1) continue;
+      float px = texture(img_orig, (3*ipos + 0.5 + vec2(i,j))/vec2(textureSize(img_orig, 0))).r;
+      float p2 = px * px;
+      vec2 p = vec2(i, j) - mw;
+      Sw[0][0] += p2 * p.x * p.x;
+      Sw[0][1] += p2 * p.x * p.y;
+      Sw[1][0] += p2 * p.y * p.x;
+      Sw[1][1] += p2 * p.y * p.y;
+      sw += p2;
+      p = vec2(i, j) - mb;
+      p2 = 1.0/p2;
+      Sb[0][0] += p2 * p.x * p.x;
+      Sb[0][1] += p2 * p.x * p.y;
+      Sb[1][0] += p2 * p.y * p.x;
+      Sb[1][1] += p2 * p.y * p.y;
+      sb += p2;
+    }
+    Sw /= sw;
+    Sb /= sb;
+    mat2 S = determinant(Sw) < determinant(Sb) ? Sw : Sb;
+    vec2 eval, evec0, evec1;
+    evd2x2(eval, evec0, evec1, S);
+    eval *= 0.4;
+    if     (abs(evec0.x) > 2.*abs(evec0.y)) evec0 = vec2(1, 0);
+    else if(abs(evec0.y) > 2.*abs(evec0.x)) evec0 = vec2(0, 1);
+    else eval = vec2(.1, .1);
+    imageStore(img_out, ipos, vec4(eval, evec0));
+  }
+}

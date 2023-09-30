@@ -1,0 +1,80 @@
+#version 460
+#extension GL_GOOGLE_include_directive    : enable
+#extension GL_EXT_nonuniform_qualifier    : enable
+
+#include "shared.glsl"
+#include "llap.glsl"
+
+layout(local_size_x = DT_LOCAL_SIZE_X, local_size_y = DT_LOCAL_SIZE_Y, local_size_z = 1) in;
+
+layout(std140, set = 0, binding = 1) uniform params_t
+{
+  float sigma;
+  float shadows;
+  float highlights;
+  float clarity;
+} params;
+
+layout(set = 1, binding = 0) uniform sampler2D img_in;
+layout(set = 1, binding = 1) uniform writeonly image2D img_out[];
+
+layout(push_constant, std140) uniform push_t
+{
+  uint num_gamma;
+} push;
+
+// shit this turns ugly for clarity >= 5. try this:
+// gnuplot> plot for [i=0:10] (5*i/10.0)*(x-g)*exp(-(x-g)*(x-g)/(2*s*s/3.0)) + g + s*2.0*(1-(x-g)/(2*s))*(x-g)/(2*s) + ((x-g)/(2*s))**2*(s+s*b) lw 5
+// the above looks monotonic for up to i < 5, i.e. clarity < 2.5
+// maybe we should instead try that for up to i=5?
+// plot for [i=0:10] (x-g) - (5*i/10.0)*(x-g)/(s*s) * 1.0/(sqrt(2*3.141592)*s)*0.001*exp(-(x-g)**2/(2*s*s)) lw 5
+//
+// another attempt:
+// use f(x) = x / (x+c)  and the inverse -cx / (x-1)
+// where slope at 0 is 1/c (or c for the inverse)
+// c is the clarity
+// TODO: normalise out c by multiplying 1/f(1), which is (1+c)
+// so final functions are: (1+c)*(x)/(x+c),-c*x/(1+c)/(x/(1+c)-1)
+// shadows is behaviour at f(1)
+float
+curve(
+    float x,
+    float g,
+    float sigma,
+    float shadows,
+    float highlights,
+    float clarity)
+{
+  const float c = x-g;
+  float val;
+  const float ssigma = c > 0.0f ? sigma : - sigma;
+  const float shadhi = c > 0.0f ? shadows : highlights;
+  if (abs(c) > 2*sigma) val = g + ssigma + shadhi * (c-ssigma); // linear part
+  else
+  { // blend in via quadratic bezier
+    const float t = clamp(c / (2.0f*ssigma), 0.0f, 1.0f);
+    const float t2 = t * t;
+    const float mt = 1.0f-t;
+    val = g + ssigma * 2.0f*mt*t + t2*(ssigma + ssigma*shadhi);
+  }
+  // midtone local contrast
+  val += clarity * c * exp(-c*c/(2.0f*sigma*sigma/3.0f));
+  return val;
+}
+
+void
+main()
+{
+  ivec2 ipos = ivec2(gl_GlobalInvocationID);
+  if(any(greaterThanEqual(ipos, textureSize(img_in, 0)))) return;
+
+  // clamp away nans and infs, they would destroy our image:
+  float y = luminance_rec2020(clamp(texelFetch(img_in, ipos, 0).rgb, -1000.0, 1000.0));
+
+  for(uint i=0;i<push.num_gamma;i++)
+    imageStore(img_out[i], ipos,
+        vec4(curve(y, gamma_from_i(i),
+            params.sigma, params.shadows, params.highlights, params.clarity)));
+  imageStore(img_out[push.num_gamma], ipos, vec4(y));
+}
+
