@@ -7,3 +7,4 @@ git rm -rf bin/ doc/ ext/ src/
 tar xJf ${VKDTDIR}/vkdt-${VER}.tar.xz --strip-components=1
 git add $(tar tJf ${VKDTDIR}/vkdt-${VER}.tar.xz | cut -f2- -d/)
 git commit -a -m "update to ${VER}"
+git tag ${VER}
