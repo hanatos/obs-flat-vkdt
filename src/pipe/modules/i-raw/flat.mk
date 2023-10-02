@@ -42,18 +42,11 @@ endif # end rawspeed
 ifeq ($(VKDT_USE_RAWINPUT),2)
 MOD_LDFLAGS=pipe/modules/i-raw/rawloader-c/target/release/librawloader.a
 MOD_CFLAGS=-Ipipe/modules/i-raw/rawloader-c
-pipe/modules/i-raw/libi-raw.so: pipe/modules/i-raw/rawloader-c/target/release/librawloader.a pipe/modules/i-raw/rawloader/target/release/librawloader.rlib
+pipe/modules/i-raw/libi-raw.so: pipe/modules/i-raw/rawloader-c/target/release/librawloader.a
 
-pipe/modules/i-raw/rawloader/Cargo.toml:
-	$(shell git clone https://github.com/pedrocr/rawloader --depth 1 --branch master --single-branch pipe/modules/i-raw/rawloader)
-
-pipe/modules/i-raw/rawloader-c/target/release/librawloader.a: pipe/modules/i-raw/rawloader/target/release/librawloader.rlib pipe/modules/i-raw/rawloader-c/lib.rs
+pipe/modules/i-raw/rawloader-c/target/release/librawloader.a: pipe/modules/i-raw/rawloader-c/lib.rs
 	cd pipe/modules/i-raw/rawloader-c; cargo build --release
-
-pipe/modules/i-raw/rawloader/target/release/librawloader.rlib: pipe/modules/i-raw/rawloader/Cargo.toml
-	cd pipe/modules/i-raw/rawloader; cargo build --release
-endif # end rawloader
+endif
 
 distclean:
-	rm -rf pipe/modules/i-raw/rawloader
 	rm -rf pipe/modules/i-raw/rawspeed
