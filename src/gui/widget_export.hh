@@ -201,6 +201,6 @@ dt_export(
   {
     if(mso->param[i]->name == dt_token("filename") || // skip, these are handled globally
        mso->param[i]->name == dt_token("quality")) continue;
-    export_render_widget(mso, i, w->pdata[i]);
+    export_render_widget(mso, i, w->pdata[w->format]);
   }
 }

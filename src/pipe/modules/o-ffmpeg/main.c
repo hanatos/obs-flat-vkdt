@@ -51,9 +51,9 @@ void write_sink(
   if(!dat->f)
   { // init if not done before
     const char *basename  = dt_module_param_string(mod, 0);
-    const int   p_codec   = dt_module_param_int  (mod, 1)[0];
-    const int   p_profile = dt_module_param_int  (mod, 2)[0];
-    const float p_quality = dt_module_param_float(mod, 3)[0];
+    const float p_quality = dt_module_param_float(mod, 1)[0];
+    const int   p_codec   = dt_module_param_int  (mod, 2)[0];
+    const int   p_profile = dt_module_param_int  (mod, 3)[0];
     const int   p_colour  = dt_module_param_int  (mod, 4)[0];
 
     const int width  = mod->connector[0].roi.wd & ~1;
@@ -85,13 +85,13 @@ void write_sink(
     { // h264, 8-bit
       snprintf(filename, sizeof(filename), "%s.mp4", basename);
       snprintf(cmdline, sizeof(cmdline),
-          "ffmpeg -y -f rawvideo"
+          "ffmpeg -y -f rawvideo "
           "-colorspace bt2020nc -color_trc linear -color_primaries bt2020 -color_range pc "
           "-pix_fmt rgba64le -s %dx%d -r %g -i - "
           "-vf 'colorspace=all=bt709:trc=bt709:iall=bt2020:itrc=linear' "
           "-c:v libx264 -pix_fmt yuv420p " // -level:v 3 " // -b:v 2500 " -profile:v baseline
           "-crf %d "
-          "-v error "
+          // "-v error "
           "%s",
           width, height, rate, (int)CLAMP(51-p_quality*51.0/100.0, 0, 51), filename);
     }
