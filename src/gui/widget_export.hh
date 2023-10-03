@@ -10,6 +10,11 @@ export_render_widget(
   const dt_ui_param_t *param = mso->param[parid];
   if(!param) return;
 
+  // skip if group mode does not match:
+  if(param->widget.grpid != -1)
+    if(*(const int32_t *)(pdata + mso->param[param->widget.grpid]->offset) != param->widget.mode)
+      return;
+
   static int gamepad_reset = 0;
   if(ImGui::IsKeyPressed(ImGuiKey_GamepadR3)) gamepad_reset = 1;
   // some state for double click detection for reset functionality

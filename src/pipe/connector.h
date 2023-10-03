@@ -23,6 +23,7 @@ typedef enum dt_connector_flags_t
   s_conn_clear         = 2,  // clear this to zero before writing
   s_conn_feedback      = 4,  // this connection is only in between frames (written frame 1 and read frame 2)
   s_conn_dynamic_array = 8,  // dynamically allocated array connector, contents can change during animation
+  s_conn_protected     = 16, // flag this connector for rewrites/accumulation/don't overwrite with other buffers
 }
 dt_connector_flags_t;
 
@@ -167,12 +168,15 @@ static inline size_t
 dt_connector_bytes_per_channel(const dt_connector_t *c)
 {
   if(c->format == dt_token("ui32")) return 4;
+  if(c->format == dt_token("u32"))  return 4;
   if(c->format == dt_token("f32"))  return 4;
   if(c->format == dt_token("atom")) return 4; // evaluates to ui32 if no float atomics are supported, f32 otherwise
   if(c->format == dt_token("dspy")) return 4;
   if(c->format == dt_token("ui16")) return 2;
+  if(c->format == dt_token("u16"))  return 2;
   if(c->format == dt_token("f16"))  return 2;
   if(c->format == dt_token("ui8"))  return 1;
+  if(c->format == dt_token("u8"))   return 1;
   return 0;
 }
 

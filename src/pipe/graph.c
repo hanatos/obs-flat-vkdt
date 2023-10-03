@@ -463,7 +463,7 @@ allocate_image_array_element(
 
   assert(!(mem_req.alignment & (mem_req.alignment - 1)));
 
-  if(heap_offset == 0 && (c->frames == 2 || c->type == dt_token("source"))) // allocate protected memory, only in outer heap
+  if(heap_offset == 0 && (c->frames == 2 || c->type == dt_token("source") || (c->flags & s_conn_protected))) // allocate protected memory, only in outer heap
     img->mem = dt_vkalloc_feedback(heap, mem_req.size, mem_req.alignment);
   else
     img->mem = dt_vkalloc(heap, mem_req.size, mem_req.alignment);
@@ -482,7 +482,7 @@ allocate_image_array_element(
     img->mem->ref = c->connected_mi;
 
   // TODO: better and more general caching:
-  if(heap_offset == 0 && c->type == dt_token("source"))
+  if(heap_offset == 0 && (c->type == dt_token("source") || (c->flags & s_conn_protected)))
     img->mem->ref++; // add one more so we can run the pipeline starting from after upload easily
 
   return VK_SUCCESS;
@@ -1699,6 +1699,15 @@ record_command_buffer(dt_graph_t *graph, dt_node_t *node, int runflag)
                 (node->connector[i].flags & s_conn_feedback) ?
                 1-(graph->frame & 1) :
                 graph->frame)->buffer);
+      if(dt_connector_output(node->connector+i) && (node->connector[i].flags & s_conn_clear))
+      {
+        VkBuffer buf = dt_graph_connector_image(graph, node-graph->node, i, 0,
+                (node->connector[i].flags & s_conn_feedback) ?
+                1-(graph->frame & 1) :
+                graph->frame)->buffer;
+        vkCmdFillBuffer(cmd_buf, buf, 0, VK_WHOLE_SIZE, 0);
+        BARRIER_COMPUTE_BUFFER(buf);
+      }
       continue;
     }
     if(dt_connector_input(node->connector+i))
