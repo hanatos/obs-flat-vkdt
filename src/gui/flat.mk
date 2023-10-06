@@ -21,6 +21,7 @@ GUI_H=gui/gui.h\
       gui/api.h\
       gui/api.hh\
       gui/hotkey.hh\
+      gui/widget_dopesheet.hh\
       gui/widget_draw.hh\
       gui/widget_export.hh\
       gui/widget_filebrowser.hh\
@@ -50,4 +51,4 @@ ifeq ($(VKDT_USE_PENTABLET),1)
 GUI_CFLAGS+=-DVKDT_USE_PENTABLET=1
 endif
 
-gui/main.o:core/version.h core/signal.h
+gui/main.o: core/signal.h
