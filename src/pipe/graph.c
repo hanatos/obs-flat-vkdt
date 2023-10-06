@@ -2122,10 +2122,12 @@ VkResult dt_graph_run(
   // at least one module requested a full rebuild:
   if(module_flags & s_module_request_all) run |= s_graph_run_all;
 
+#if 0 // XXX
   // if synchronous upload/download is required, we can't interleave frames:
   if((run & (s_graph_run_upload_source | s_graph_run_download_sink)) ||
      (module_flags & (s_module_request_read_source | s_module_request_write_sink)))
     run |= s_graph_run_wait_done;
+#endif
 
   // only waiting for the gui thread to draw our output, and only
   // if we intend to clean it up behind their back
