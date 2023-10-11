@@ -1,6 +1,7 @@
 #!/bin/bash
 VKDTDIR=../vkdt
 cd ${VKDTDIR}
+git fetch
 VER=$(make release | cut -f4 -d' ')
 cd -
 git rm -rf bin/ doc/ ext/ src/
