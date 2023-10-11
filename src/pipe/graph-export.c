@@ -254,9 +254,8 @@ dt_graph_export(
       res = dt_graph_run(graph,
           s_graph_run_record_cmd_buf | 
           ((!param->last_frame_only || (f == graph->frame_cnt-1)) ?
-          s_graph_run_download_sink : 0)
-          // XXX | s_graph_run_wait_done);
-          );
+          s_graph_run_download_sink : 0) |
+          s_graph_run_wait_done);
       if(res != VK_SUCCESS) goto done;
       if(audio_f)
       {

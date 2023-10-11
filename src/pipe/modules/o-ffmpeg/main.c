@@ -67,14 +67,14 @@ void write_sink(
     { // apple prores encoding, 10 bit output
       snprintf(filename, sizeof(filename), "%s.mov", basename);
       snprintf(cmdline, sizeof(cmdline),
-        "ffmpeg -y -probesize 5000000 -f rawvideo "
+        "ffmpeg -threads 0 -y -probesize 5000000 -f rawvideo "
         "-colorspace bt2020nc -color_trc linear -color_primaries bt2020 -color_range pc "
         "-pix_fmt rgba64le -s %dx%d -r %g -i - "
         "-vf 'colorspace=all=bt2020:trc=bt2020-10:iall=bt2020:itrc=linear' "
         "-c:v prores -profile:v %d " // 0 1 2 3 for Proxy LT SQ HQ
         "-qscale:v %d " // is this our quality parameter: 2--31, lower qs -> higher bitrate
         "-vendor apl0 -pix_fmt %s " // yuv422p10le or yuva444p10le for 4444
-        "%s",
+        "\"%s\"",
         width, height, rate,
         CLAMP(p_profile, 0, 3),
         (int)CLAMP(31-p_quality*30/100.0, 1, 31),
@@ -85,7 +85,7 @@ void write_sink(
     { // h264, 8-bit
       snprintf(filename, sizeof(filename), "%s.mp4", basename);
       snprintf(cmdline, sizeof(cmdline),
-          "ffmpeg -y -f rawvideo "
+          "ffmpeg -threads 0 -y -f rawvideo "
           "-colorspace bt2020nc -color_trc linear -color_primaries bt2020 -color_range pc "
           "-pix_fmt rgba64le -s %dx%d -r %g -i - "
           "-vf 'colorspace=all=bt709:trc=bt709:iall=bt2020:itrc=linear' "
@@ -96,10 +96,8 @@ void write_sink(
 //          "-qp 0 "
           "-crf %d "
           // "-v error "
-          "%s",
-          width, height, rate,
-         (int)CLAMP(51-p_quality*51.0/100.0, 0, 51),
-          filename);
+          "\"%s\"",
+          width, height, rate, (int)CLAMP(51-p_quality*51.0/100.0, 0, 51), filename);
     }
     fprintf(stderr, "[o-ffmpeg] running `%s'\n", cmdline);
 
