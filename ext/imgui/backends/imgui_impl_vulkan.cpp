@@ -1928,9 +1928,10 @@ void ImGui_ImplVulkan_SetDisplayProfile(
 {
   ImGui_ImplVulkan_Data* bd = ImGui_ImplVulkan_GetBackendData();
   ImGui_ImplVulkan_InitInfo* v = &bd->VulkanInitInfo;
-  memset(v->DisplayProfile, 0,        sizeof(v->DisplayProfile));
-  memcpy(v->DisplayProfile+0, gamma0, sizeof(float)*3);
-  memcpy(v->DisplayProfile+3, gamma1, sizeof(float)*3);
+  for(uint32_t i=0;i<sizeof(v->DisplayProfile)/sizeof(v->DisplayProfile[0]);i++)
+    v->DisplayProfile[i] = 0.0;
+  for(int i=0;i<3;i++) v->DisplayProfile[i  ] = gamma0[i];
+  for(int i=0;i<3;i++) v->DisplayProfile[i+3] = gamma1[i];
   // glsl will transpose the matrix, so we do the same here:
   float *f = v->DisplayProfile + 6;
   f[0]  = rec2020_to_display0[0];
