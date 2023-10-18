@@ -5,8 +5,8 @@ action items are labelled (a)..(i).
 
 ## release branch
 
-use semantic versioning and make a branch `release-0.7` to
-contain tags for point releases `0.7.0` and `0.7.1` etc.
+use semantic versioning and make a branch `release-0.8` to
+contain tags for point releases `0.8.0` and `0.8.1` etc.
 the `master` branch will carry on with new features and eventually become the
 next release branch.
 
@@ -30,8 +30,8 @@ rawspeed and quakespasm will only be deployed depending on build settings in `bi
 to generate it for local testing purposes without pushing the tag
 to the public repository, (c)
 ```
-git tag -s '0.7.0' -m "this is release 0.7.0"
-git push dreggn 0.7.0
+git tag -s '0.8.0' -m "this is release 0.8.0"
+git push dreggn 0.8.0
 git fetch --all --tags
 ```
 
@@ -49,8 +49,8 @@ cat src/core/version.h
 
 ```
 cd /tmp
-tar xvJf vkdt-0.7.0.tar.xz
-cd vkdt-0.7.0/
+tar xvJf vkdt-0.8.0.tar.xz
+cd vkdt-0.8.0/
 make -j20
 DESTDIR=/tmp/testrel make install
 /tmp/testrel/usr/bin/vkdt
@@ -62,10 +62,10 @@ run `bin/mkappimg.sh` from the root directory
 
 ## upload
 
-(g) push to public: `git push origin 0.7.0 release-0.7`
+(g) push to public: `git push origin 0.8.0 release-0.8`
 
 (h) sign the tarball:
-`gpg -u jo@dreggn.org --detach-sign vkdt-0.7.0.tar.xz`
+`gpg -u jo@dreggn.org --detach-sign vkdt-0.8.0.tar.xz`
 
 (i) github release announcement
 
@@ -76,48 +76,6 @@ run `bin/mkappimg.sh` from the root directory
 
 ### current changelog
 
-lots of small fixes for complicated/non-directed graphs, ui streamlining and polishing,
-doc and website updates.
-
-lighttable:
-
-* add button to create video from timelapse sequence of raw files
-* output modules all show their individual parameters now
-* new automatic labels: video and bracket
-
-darkroom:
-
-* new dopesheet widget to manage keyframes
-* animation controls
-* introducing keyaccels: quickly bind small scripts to hotkeys (for instance
-  expose up by half a stop, rotate ccw by one degree)
-
-new modules:
-
-* `autoexp` new module for autoexposure, most useful in video sequences
-* `i-exr` initial openexr file support for reading
-* new module `hotpx` to remove stuck pixels in bayer images
-
-modules:
-
-* `hilite` smooth out c/a artifacts at boundaries of overexposed regions
-* `o-ffmpeg` support prores PQ/smpte 2084 10-bit output
-* `i-vid` support 420, 422, and 8-, 10-, 12-, 16-bit input
-* `quake` with more parameters and amd raytracing support
-* `i-pfm` supports animation frames and noise profile arguments
-* `pick` colours with freeze support for copy/pasting of settings
-* `grade` with colour wheels input
-* `blend` with option to invert mask
-* `demosaic` now with RCD support. it's slower than the gaussian splats. some
-  numbers for 16MP: gaussian splatting: 1.5ms, new RCD: 2.5ms, darktable's
-  opencl implementation on the same image: 21ms.
-
-build:
-
-* `i-raw` update rawspeed to upstream + cr3 (but will not do it again)
-* support rawler/rust backend to load raw images as replacement for rawspeed/exiv2
-* initial .AppImage package provided
-
 
 ## diverge branches
 
@@ -126,5 +84,5 @@ will also only be pushed to this branch). the release branch will be used for
 bugfix/pointreleases.
 tag the master/development branch as such, so dev packages will be ordered correctly:
 ```
-git tag -s 0.7.9999 -m "this is the beginning of the unreleased development branch which will become 0.8.0 eventually"
+git tag -s 0.8.99 -m "this is the beginning of the unreleased development branch which will become 0.9.0 eventually"
 ```
