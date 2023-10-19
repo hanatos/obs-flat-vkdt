@@ -48,7 +48,6 @@ it follows the current list of available modules.
 * [ca: correct chromatic aberrations](./ca/readme.md)
 * [demosaic: demosaic bayer or x-trans raw files](./demosaic/readme.md)
 * [hilite: highlight reconstruction based on local inpainting](./hilite/readme.md)
-* [menon: alternative demosaicing for bayer sensors](./menon/readme.md)
 
 **colour processing**
 
@@ -81,6 +80,7 @@ it follows the current list of available modules.
 * [draw: draw raster masks via brush strokes (e.g. for dodging and burning)](./draw/readme.md)
 * [guided: guided filter blur module, useful for refining drawn masks](./guided/readme.md)
 * [inpaint: smooth reconstruction of masked out areas](./inpaint/readme.md)
+* [mask: create parametric masks from colour images for use with blending](./mask/readme.md)
 * [wavelet: skin retouching](./wavelet/readme.md)
 
 **effects**
