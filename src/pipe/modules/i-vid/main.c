@@ -62,11 +62,13 @@ parse_parameters(
     dt_module_t *mod,
     vid_data_t  *d)
 {
-  int *p_colour = (int *)dt_module_param_int(mod, dt_module_get_param(mod->so, dt_token("colour")));
-  int *p_trc    = (int *)dt_module_param_int(mod, dt_module_get_param(mod->so, dt_token("trc")));
-  int *p_bits   = (int *)dt_module_param_int(mod, dt_module_get_param(mod->so, dt_token("bitdepth")));
-  int *p_chroma = (int *)dt_module_param_int(mod, dt_module_get_param(mod->so, dt_token("chroma")));
+  int *p_colour   = (int *)dt_module_param_int(mod, dt_module_get_param(mod->so, dt_token("colour")));
+  int *p_trc      = (int *)dt_module_param_int(mod, dt_module_get_param(mod->so, dt_token("trc")));
+  int *p_bits     = (int *)dt_module_param_int(mod, dt_module_get_param(mod->so, dt_token("bitdepth")));
+  int *p_chroma   = (int *)dt_module_param_int(mod, dt_module_get_param(mod->so, dt_token("chroma")));
+  int *p_colrange = (int *)dt_module_param_int(mod, dt_module_get_param(mod->so, dt_token("colrange")));
 
+  // if(p_bits[0] == 4) // we *always* overwrite this because it will crash if a user sets this to a wrong thing!
   switch(d->fmtc->streams[d->video_idx]->codecpar->format)
   {
     case AV_PIX_FMT_YUVJ420P:
@@ -89,6 +91,7 @@ parse_parameters(
     default:
       p_bits[0] = 4; // unsupported
   }
+  // if(p_chroma[0] == 3) // we *always* overwrite this because it will crash if a user sets this to a wrong thing!
   switch(d->fmtc->streams[d->video_idx]->codecpar->format)
   {
     case AV_PIX_FMT_YUVJ420P:
@@ -106,6 +109,19 @@ parse_parameters(
       break;
     default:
       p_chroma[0] = 3; // unsupported
+  }
+  if(p_colrange[0] == 2)
+  switch(d->fmtc->streams[d->video_idx]->codecpar->color_range)
+  { 
+    case AVCOL_RANGE_MPEG:
+      p_colrange[0] = 0;
+      break;
+    case AVCOL_RANGE_UNSPECIFIED:
+    case AVCOL_RANGE_JPEG:
+      p_colrange[0] = 1;
+      break;
+    default:
+      p_colrange[0] = 1; // default to jpeg/full range
   }
 
   // enum AVCodecID vcodec = d->fmtc->streams[d->video_idx]->codecpar->codec_id;
@@ -187,11 +203,14 @@ parse_parameters(
     "NB: Not part of ABI",
   };
   fprintf(stderr, "[i-vid] trc %s\n", ctrc[color_trc]);
-  p_trc[0] = 4; // unsupported
-  if(color_trc == 8)  p_trc[0] = 0; // linear
-  if(color_trc == 1)  p_trc[0] = 1; // bt.709
-  if(color_trc == 16) p_trc[0] = 2; // smpte 2084
-  if(color_trc == 18) p_trc[0] = 3; // HLG
+  if(p_trc[0] == 4)
+  {
+    p_trc[0] = 1; // default to bt.709
+    if(color_trc == 8)  p_trc[0] = 0; // linear
+    if(color_trc == 1)  p_trc[0] = 1; // bt.709
+    if(color_trc == 16) p_trc[0] = 2; // smpte 2084
+    if(color_trc == 18) p_trc[0] = 3; // HLG
+  }
 
   static const char* cs[] = {
     "RGB:   order of coefficients is actually GBR, also IEC 61966-2-1 (sRGB)",
@@ -212,9 +231,12 @@ parse_parameters(
     "NB:  Not part of ABI",
   };
   fprintf(stderr, "[i-vid] colour space %s\n", cs[color_space]);
-  p_colour[0] = 2; // usupported
-  if(color_space == 1) p_colour[0] = 0; // bt.709
-  if(color_space == 9) p_colour[0] = 1; // bt.2020 non constant luminance
+  if(p_colour[0] == 2)
+  {
+    p_colour[0] = 0; // default to bt.709
+    if(color_space == 1) p_colour[0] = 0; // bt.709
+    if(color_space == 9) p_colour[0] = 1; // bt.2020 non constant luminance
+  }
 
   static const char* cl[] = {
     "UNSPECIFIED",
@@ -455,25 +477,14 @@ int read_source(
 
   if(p->a == 0)
   { // first channel, new frame. parse + decode + handle audio:
-    const double tbn = 1.0/av_q2d(d->fmtc->streams[d->video_idx]->time_base);
-    int rate = tbn/mod->graph->frame_rate; // some obscure sampling rate vs frames per second number
-    // fprintf(stderr, "frames %d %ld %d %d\n", mod->graph->frame, d->frame, d->vctx->frame_num, vfidx);//d->vframe->pts);
-#if 1
-    // if(mod->graph->frame != d->frame)
     if(mod->graph->frame + 1 != d->vctx->frame_num) // zero vs 1 based
     { // seek
-      // XXX ??? can't seek in our own output (maybe it's the mov? try mkv instead)
-      // old api. passing -1 converts the timestamp to something even more obscure.
-      // passing video idx seeks to somewhere about the right place (+10 frames or so)
-      int64_t dts = mod->graph->frame * rate;
-      if((ret = av_seek_frame(d->fmtc, d->video_idx, dts, AVSEEK_FLAG_ANY)) < 0) goto error;
-      if(d->actx)
-      if((ret = av_seek_frame(d->fmtc, d->audio_idx, dts, AVSEEK_FLAG_ANY)) < 0) goto error;
-      avcodec_flush_buffers(d->vctx);
-      if(d->actx) avcodec_flush_buffers(d->actx);
+      double rate = AV_TIME_BASE / mod->graph->frame_rate;
+      int ts = mod->graph->frame * rate;
+      if(avformat_seek_file(d->fmtc, -1, ts-2, ts, ts+2, AVSEEK_FLAG_ANY))
+        goto error;
       d->snd_lag = 0;
     }
-#endif
     d->frame = mod->graph->frame+1; // this would be the next one we read
 
     AVPacket *curr = d->pkt0;
