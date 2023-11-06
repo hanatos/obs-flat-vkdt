@@ -24,6 +24,7 @@ it follows the current list of available modules.
 **output**
 
 * [o-bc1: write bc1 compressed thumbnail files](./o-bc1/readme.md)
+* [o-exr: write openexr image files](./o-exr/readme.md)
 * [o-ffmpeg: write h264 compressed video stream for multi-frame input](./o-ffmpeg/readme.md)
 * [o-jpg: write jpeg compressed still image](./o-jpg/readme.md)
 * [o-lut: write varying precision multi channel luts](./o-lut/readme.md)
@@ -93,6 +94,7 @@ it follows the current list of available modules.
 * [blend: masked frame blending](./blend/readme.md)
 * [cnn: convolutional neural network](./cnn/readme.md)
 * [f2srgb: convert linear floating point data to 8-bit sRGB for output](./f2srgb/readme.md)
+* [mv2rot: estimate rotation + translation from motion vectors](./mv2rot/readme.md)
 * [resize: add ability to resize buffers](./resize/readme.md)
 * [srgb2f: convert sRGB input to linear rec2020 floating point](./srgb2f/readme.md)
 

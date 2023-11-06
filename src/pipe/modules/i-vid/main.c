@@ -455,8 +455,6 @@ void modify_roi_out(
   // this first needs a robust way of doing frame drops.
   if(mod->graph->frame_rate == 0) // don't overwrite cfg
     mod->graph->frame_rate = frame_rate;
-
-  mod->connector[0].format = d->p_bits > 0 ? dt_token("ui16") : dt_token("ui8");
 }
 
 #if 0 // TODO
@@ -560,22 +558,10 @@ int read_source(
       for(int j=0;j<ht;j++)
         memcpy(mapped + sizeof(uint8_t) * wd * j, d->vframe->data[p->a] + d->vframe->linesize[p->a]*j, wd);
     }
-    else if(p_bits == 1)
-    { // 10-bit
-      for(int j=0;j<ht;j++)
-        for(int i=0;i<wd;i++)
-          ((uint16_t*)mapped)[wd*j+i] = ((uint16_t*)(d->vframe->data[p->a] + sizeof(uint16_t)*i + d->vframe->linesize[p->a]*j))[0]*64;
-    }
-    else if(p_bits == 2)
-    { // 12-bit
-      for(int j=0;j<ht;j++)
-        for(int i=0;i<wd;i++)
-          ((uint16_t*)mapped)[wd*j+i] = ((uint16_t*)(d->vframe->data[p->a] + sizeof(uint16_t)*i + d->vframe->linesize[p->a]*j))[0]*16;
-    }
-    else if(p_bits == 3)
+    else if(p_bits == 1 || p_bits == 2 || p_bits == 3)
     { // 16-bit
       for(int j=0;j<ht;j++)
-        memcpy(mapped + sizeof(uint16_t) * wd * j, d->vframe->data[p->a] + d->vframe->linesize[p->a]*j, wd);
+        memcpy(mapped + sizeof(uint16_t) * wd * j, d->vframe->data[p->a] + d->vframe->linesize[p->a]*j, wd * sizeof(uint16_t));
     }
   }
 
