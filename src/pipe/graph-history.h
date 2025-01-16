@@ -34,7 +34,7 @@ dt_graph_history_reset(
   // write all connections
   for(uint32_t m=0;m<graph->num_modules;m++)
     for(int c=0;c<graph->module[m].num_connectors;c++,i+=(hi[i+1]!=hi[i]))
-      if(!(hi[i+1] = dt_graph_write_connection_ascii(graph, m, c, hi[i], max-hi[i])))
+      if(!(hi[i+1] = dt_graph_write_connection_ascii(graph, m, c, hi[i], max-hi[i], 1)))
         return 1;
 
   // write all params
@@ -130,7 +130,7 @@ dt_graph_history_connection(
   if(_dt_graph_history_check_buf(graph, 70)) return;
   int i = graph->history_item_end;
   char **hi = graph->history_item, *max = graph->history_pool + graph->history_max;
-  if(hi[i] < (hi[i+1] = dt_graph_write_connection_ascii(graph, modid, conid, hi[i], max - hi[i])))
+  if(hi[i] < (hi[i+1] = dt_graph_write_connection_ascii(graph, modid, conid, hi[i], max - hi[i], 1)))
   { *(hi[i+1]-1) = 0; graph->history_item_cur = ++graph->history_item_end; }
 }
 
@@ -203,6 +203,7 @@ dt_graph_history_set(
   for(uint32_t i=0;i<graph->history_item_cur;i++)
     if(dt_graph_read_config_line(graph, graph->history_item[i]) < 0)
       return 1;
+  for(int m=0;m<graph->num_modules;m++) dt_module_keyframe_post_update(graph->module+m);
   return 0;
 }
 
@@ -239,4 +240,32 @@ dt_module_add_with_history(
   int new_modid = dt_module_add(graph, name, inst);
   if(new_modid >= 0) dt_graph_history_module(graph, new_modid);
   return new_modid;
+}
+
+static inline void
+dt_module_remove_with_history(
+    dt_graph_t *graph,
+    dt_token_t  name,
+    dt_token_t  inst)
+{
+  int modid = -1;
+  for(uint32_t i=0;i<graph->num_modules;i++)
+    if(graph->module[i].name == name && graph->module[i].inst == inst)
+    { modid = i; break; }
+  if(modid == -1) return;
+  for(int c=0;c<graph->module[modid].num_connectors;c++)
+  {
+    if(dt_connector_input(graph->module[modid].connector+c))
+      dt_module_connect_with_history(graph, -1, -1, modid, c);
+    else for(int m2=0;m2<graph->num_modules;m2++)
+    { // find all connected modules and remove connection
+      if(graph->module[m2].name == 0) continue;
+      for(int c2=0;c2<graph->module[m2].num_connectors;c2++)
+        if(dt_connector_input(graph->module[m2].connector+c2) &&
+            graph->module[m2].connector[c2].connected_mi == modid &&
+            graph->module[m2].connector[c2].connected_mc == c)
+          dt_module_connect_with_history(graph, -1, -1, m2, c2);
+    }
+  }
+  dt_module_remove(graph, modid);
 }

@@ -17,6 +17,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
+#include "pipe/token.h"
 #include "core/core.h"
 #include "core/threads.h"
 #include "qvk_util.h"
@@ -66,7 +67,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
     } \
   } while(0)
 
-#define QVK_MAX_FRAMES_IN_FLIGHT 2
 #define QVK_MAX_SWAPCHAIN_IMAGES 4
 
 #define QVK_LOAD(FUNCTION_NAME) PFN_##FUNCTION_NAME q##FUNCTION_NAME = (PFN_##FUNCTION_NAME) vkGetInstanceProcAddr(qvk.instance, #FUNCTION_NAME)
@@ -74,32 +74,33 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 // forward declare
 typedef struct GLFWwindow GLFWwindow;
 
+typedef enum qvk_queue_name_t
+{
+  s_queue_graphics = 0,
+  s_queue_compute  = 1,
+  s_queue_work0    = 2,
+  s_queue_work1    = 3,
+  s_queue_cnt      = 4,
+}
+qvk_queue_name_t;
+
+typedef struct qvk_queue_t
+{ // wraps all we need to identify and talk to a vulkan queue
+  threads_mutex_t mutex;
+  VkQueue         queue;
+  int32_t         family;
+  int32_t         idx;
+}
+qvk_queue_t;
+
 typedef struct qvk_t
 {
   VkInstance                  instance;
   VkPhysicalDevice            physical_device;
   VkPhysicalDeviceMemoryProperties mem_properties;
   VkDevice                    device;
-  threads_mutex_t             queue_mutex;
-  VkQueue                     queue_graphics;
-  VkQueue                     queue_compute;
-  VkQueue                     queue_work0;
-  VkQueue                     queue_work1;
-  threads_mutex_t             queue_work0_mutex;
-  threads_mutex_t             queue_work1_mutex;
-  int32_t                     queue_idx_graphics;
-  int32_t                     queue_idx_compute;
-  int32_t                     queue_idx_work0;
-  int32_t                     queue_idx_work1;
-  VkSurfaceKHR                surface;
-  VkSwapchainKHR              swap_chain;
-  VkSurfaceFormatKHR          surf_format;
-  VkPresentModeKHR            present_mode;
-  VkExtent2D                  extent;
-  VkCommandPool               command_pool;
-  uint32_t                    num_swap_chain_images;
-  VkImage                     swap_chain_images[QVK_MAX_SWAPCHAIN_IMAGES];
-  VkImageView                 swap_chain_image_views[QVK_MAX_SWAPCHAIN_IMAGES];
+  int                         qid[s_queue_cnt];   // map queue names to actual indices in the queue array (they may be the same)
+  qvk_queue_t                 queue[s_queue_cnt];
 
   VkSampler                   tex_sampler;
   VkSampler                   tex_sampler_nearest;
@@ -114,15 +115,10 @@ typedef struct qvk_t
 
   VkDebugUtilsMessengerEXT    dbg_messenger;
 
-  int                         win_width;
-  int                         win_height;
   uint64_t                    frame_counter;
 
-  GLFWwindow                  *window;
   uint32_t                    num_glfw_extensions;
   const char                  **glfw_extensions;
-
-  uint32_t                    current_image_index;
 
   float                       ticks_to_nanoseconds;
   uint64_t                    uniform_alignment;
@@ -130,10 +126,13 @@ typedef struct qvk_t
 
   int                         raytracing_supported;
   int                         float_atomics_supported;
+  int                         coopmat_supported;
 }
 qvk_t;
 
-extern qvk_t qvk;
+#ifndef VKDT_DSO_BUILD
+VKDT_API extern qvk_t qvk;
+#endif
 
 #ifdef QVK_ENABLE_VALIDATION
 #define _VK_EXTENSION_LIST \
@@ -148,7 +147,5 @@ _VK_EXTENSION_LIST
 
 // global initialisation. pick device by that name if it is not null,
 // same for the direct id if it is not negative (use for multiple identical devices)
-VkResult qvk_init(const char *preferred_device_name, int preferred_device_id);
+VkResult qvk_init(const char *preferred_device_name, int preferred_device_id, int window);
 VkResult qvk_cleanup();
-
-VkResult qvk_create_swapchain();

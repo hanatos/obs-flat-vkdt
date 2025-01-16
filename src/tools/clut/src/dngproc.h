@@ -292,8 +292,8 @@ dng_profile_fill(
   }
   if(illuminant == 2)
   { // D65 in XYZ (illum E)
-    p->wb[0] = 0.3127;
-    p->wb[1] = 0.329;
+    p->wb[0] = 0.31272;
+    p->wb[1] = 0.32903;
     p->wb[2] = 1.0-p->wb[0]-p->wb[1];
   }
 
@@ -372,7 +372,6 @@ dng_process(
   float hsvmap[3];
   lookup_hsm(p, hsv, hsvmap);
   // add hue shift and wrap
-  fprintf(stderr, "hueshift %g\n", hsvmap[0]);
   hsv[0] = fmod(hsv[0] + hsvmap[0], 360.0f);
   // multiply sat factor and clamp
   hsv[1] *= hsvmap[1];

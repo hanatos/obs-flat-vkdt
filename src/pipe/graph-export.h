@@ -2,17 +2,6 @@
 
 // export convenience functions, see cli/main.c
 
-// fine grained interface:
-
-// replace given display node instance by export module.
-// returns 0 on success.
-int
-dt_graph_replace_display(
-    dt_graph_t *graph,
-    dt_token_t  inst,    // instance of display module, 0 -> "main"
-    dt_token_t  mod,     // export module to insert, 0 -> "o-jpg"
-    int         resize); // if this is non-zero, insert an explicit resize node
-
 // disconnect all (remaining) display modules
 void
 dt_graph_disconnect_display_modules(
@@ -24,16 +13,18 @@ typedef struct dt_graph_export_output_t
   int max_height;
   dt_token_t mod;          // o-bc1, o-jpg, o-pfm, .. ?
   dt_token_t inst;         // instance name of sink to replace
+  dt_token_t inst_out;     // instance name of the module to replace the sink. leave 0 for == inst.
   const char *p_filename;  // set filename param to this
   const char *p_audio;     // if set, write audio to this file
   const char *p_pdata;     // if set, overwrite params of output module
   float quality;           // set quality param to this
+  int   colour_primaries;  // request a certain colour space for the output
+  int   colour_trc;
 }
 dt_graph_export_output_t;
 
 // parameter struct for export.
 // 0 is default
-// TODO: also use this for thumbnails
 // TODO: support live graph, so we can drop in without re-alloc..?
 typedef struct dt_graph_export_t
 {
@@ -50,6 +41,7 @@ typedef struct dt_graph_export_t
 
   int          dump_modules;   // debug output: write module graph in dot format
   int          last_frame_only;// only write the very last frame of an animation
+  int          print_progress; // print progress (for long animations)
 }
 dt_graph_export_t;
 

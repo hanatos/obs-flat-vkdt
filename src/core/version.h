@@ -1,2 +1,2 @@
 #pragma once
-#define VKDT_VERSION "0.7.99-45-geb30d5b0"
+#define VKDT_VERSION "0.9.99-287-g194eec73"

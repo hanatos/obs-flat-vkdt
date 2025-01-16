@@ -1,4 +1,5 @@
 #pragma once
+#include "pipe/modules/bs.h"
 #include "pipe/node.h"
 #include "pipe/graph.h"
 #include "pipe/module.h"
@@ -6,6 +7,17 @@
 
 #include <math.h>
 #include <stdarg.h>
+
+#ifdef VKDT_DSO_BUILD
+int bs_init()
+{ // need to load symbols from the dso side
+  int ret = dt_module_bs_init();
+  if(ret) fprintf(stderr, "bs init failed!\n");
+  return ret;
+}
+#endif
+
+#define dt_no_roi UINT64_C(-1)
 
 // some module specific helpers and constants
 
@@ -25,32 +37,31 @@ typedef enum
 
 // convenience function to detect inputs
 static inline int
-dt_connector_input(dt_connector_t *c)
+dt_connector_input(const dt_connector_t *c)
 {
   return c->type == dt_token("read") || c->type == dt_token("sink");
 }
 static inline int
-dt_connector_output(dt_connector_t *c)
+dt_connector_output(const dt_connector_t *c)
 {
   return c->type == dt_token("write") || c->type == dt_token("source");
 }
 static inline int
-dt_connector_ssbo(dt_connector_t *c)
+dt_connector_ssbo(const dt_connector_t *c)
 {
   return c->chan == dt_token("ssbo");
 }
 static inline int
-dt_node_source(dt_node_t *n)
+dt_node_source(const dt_node_t *n)
 {
   return n->connector[0].type == dt_token("source");
 }
 static inline int
-dt_node_sink(dt_node_t *n)
+dt_node_sink(const dt_node_t *n)
 {
   return n->connector[0].type == dt_token("sink");
 }
 
-#ifndef __cplusplus
 static inline void
 dt_connector_copy(
     dt_graph_t  *graph,
@@ -88,6 +99,7 @@ dt_connector_copy(
   c1->associated_c = mc;
 }
 
+#ifndef __cplusplus
 static inline void
 dt_connector_copy_feedback(
     dt_graph_t  *graph,
@@ -101,6 +113,7 @@ dt_connector_copy_feedback(
   graph->node[nid].connector[nc].frames = 2;
   module->connector[mc].frames = 2;
 }
+#endif
 
 // bypass a module: instead of linking the module connectors to their
 // counterparts on the node level, directly link to the node level of the next
@@ -145,12 +158,12 @@ dt_node_add(
     .name   = dt_token(name),
     .kernel = dt_token(kernel),
     .module = module,
+    .num_connectors = nc,
     .flags  = module->flags,    // propagate sink/source copy requests
-    .wd     = wd,
-    .ht     = ht,
-    .dp     = dp,
-    .num_connectors     = nc,
-    .push_constant_size = pc_size,
+    .wd     = (uint32_t)wd,
+    .ht     = (uint32_t)ht,
+    .dp     = (uint32_t)dp,
+    .push_constant_size = (size_t)pc_size,
   };
   if(pc) memcpy(graph->node[id].push_constant, pc, pc_size);
   va_list args;
@@ -164,7 +177,7 @@ dt_node_add(
     graph->node[id].connector[c].type   = dt_token(tmp1);
     graph->node[id].connector[c].chan   = dt_token(tmp2);
     graph->node[id].connector[c].format = dt_token(tmp3);
-    if((uint64_t)roi != -1ul) // not required for input connectors, they will take on that of the output. va_arg doesn't do null pointers though :(
+    if((uint64_t)roi != dt_no_roi) // not required for input connectors, they will take on that of the output. va_arg doesn't do null pointers though :(
       graph->node[id].connector[c].roi  = *roi;
     if(dt_connector_input(graph->node[id].connector+c))
       graph->node[id].connector[c].connected_mi = -1; // mark input as disconnected
@@ -188,8 +201,27 @@ dt_node_connect_named(
     if(graph->node[id0].connector[c].name == c0t) { c0i = c; break; }
   for(int c=0;c<graph->node[id1].num_connectors;c++)
     if(graph->node[id1].connector[c].name == c1t) { c1i = c; break; }
-  if(c0i < 0 || c1i < 0) return -100;
+  if(c0i < 0) return -100;
+  if(c1i < 0) return -101;
   return dt_node_connect(graph, id0, c0i, id1, c1i);
+}
+
+static inline int
+dt_node_feedback_named(
+    dt_graph_t *graph,
+    const int   id0,
+    const char *c0,
+    const int   id1,
+    const char *c1)
+{
+  int c0i = -1, c1i = -1;
+  const dt_token_t c0t = dt_token(c0), c1t = dt_token(c1);
+  for(int c=0;c<graph->node[id0].num_connectors;c++)
+    if(graph->node[id0].connector[c].name == c0t) { c0i = c; break; }
+  for(int c=0;c<graph->node[id1].num_connectors;c++)
+    if(graph->node[id1].connector[c].name == c1t) { c1i = c; break; }
+  if(c0i < 0 || c1i < 0) return -100;
+  return dt_node_feedback(graph, id0, c0i, id1, c1i);
 }
 
 static inline uint32_t
@@ -220,25 +252,21 @@ dt_api_blur_3x3(
     graph->node[nodeid_input].connector + connid_input :
     module->connector + connid_input;
   const uint32_t dp = conn_input->array_length > 0 ? conn_input->array_length : 1;
-  const int *sigmai = (int*)&sigma;
+  const uint32_t *sigmai = (uint32_t*)&sigma;
   assert(graph->num_nodes < graph->max_nodes);
   const int id_blur = graph->num_nodes++;
   graph->node[id_blur] = (dt_node_t) {
     .name   = dt_token("shared"),
     .kernel = dt_token("blurs"),
     .module = module,
-    .wd     = conn_input->roi.wd,
-    .ht     = conn_input->roi.ht,
-    .dp     = dp,
-    .num_connectors = 2,
     .connector = {{
       .name   = dt_token("input"),
       .type   = dt_token("read"),
       .chan   = conn_input->chan,
       .format = conn_input->format,
-      .roi    = conn_input->roi,
       .flags  = s_conn_smooth,
       .connected_mi = -1,
+      .roi    = conn_input->roi,
       .array_length = conn_input->array_length,
     },{
       .name   = dt_token("output"),
@@ -248,8 +276,12 @@ dt_api_blur_3x3(
       .roi    = conn_input->roi,
       .array_length = conn_input->array_length,
     }},
-    .push_constant_size = sizeof(float),
+    .num_connectors = 2,
+    .wd     = conn_input->roi.wd,
+    .ht     = conn_input->roi.ht,
+    .dp     = dp,
     .push_constant = { sigmai[0] },
+    .push_constant_size = sizeof(float),
   };
   if(id_blur_in)  *id_blur_in  = id_blur;
   if(id_blur_out) *id_blur_out = id_blur;
@@ -283,18 +315,14 @@ dt_api_blur_5x5(
     .name   = dt_token("shared"),
     .kernel = dt_token("blur"),
     .module = module,
-    .wd     = conn_input->roi.wd,
-    .ht     = conn_input->roi.ht,
-    .dp     = dp,
-    .num_connectors = 2,
     .connector = {{
       .name   = dt_token("input"),
       .type   = dt_token("read"),
       .chan   = conn_input->chan,
       .format = conn_input->format,
-      .roi    = conn_input->roi,
       .flags  = s_conn_smooth,
       .connected_mi = -1,
+      .roi    = conn_input->roi,
       .array_length = conn_input->array_length,
     },{
       .name   = dt_token("output"),
@@ -304,6 +332,10 @@ dt_api_blur_5x5(
       .roi    = conn_input->roi,
       .array_length = conn_input->array_length,
     }},
+    .num_connectors = 2,
+    .wd     = conn_input->roi.wd,
+    .ht     = conn_input->roi.ht,
+    .dp     = dp,
   };
   if(id_blur_in)  *id_blur_in  = id_blur;
   if(id_blur_out) *id_blur_out = id_blur;
@@ -339,9 +371,9 @@ dt_api_blur_sub(
     .type   = dt_token("read"),
     .chan   = conn_input->chan,
     .format = conn_input->format,
-    .roi    = conn_input->roi,
     .flags  = s_conn_smooth,
     .connected_mi = -1,
+    .roi    = conn_input->roi,
     .array_length = conn_input->array_length,
   };
   dt_connector_t co = {
@@ -361,21 +393,21 @@ dt_api_blur_sub(
   for(uint32_t i=0;i<levels;i++)
   {
     // int owd = roi.wd, oht = roi.ht; // for multi upsampling
-    for(int j=0;j<mul[i];j++)
+    for(uint32_t j=0;j<mul[i];j++)
     {
       assert(graph->num_nodes < graph->max_nodes);
       const int id_blur = graph->num_nodes++;
-      int hwd = j == mul[i]-1 ? (roi.wd + 1)/2 : roi.wd;
-      int hht = j == mul[i]-1 ? (roi.ht + 1)/2 : roi.ht;
+      uint32_t hwd = j == mul[i]-1 ? (roi.wd + 1)/2 : roi.wd;
+      uint32_t hht = j == mul[i]-1 ? (roi.ht + 1)/2 : roi.ht;
       graph->node[id_blur] = (dt_node_t) {
         .name   = dt_token("shared"),
         .kernel = dt_token("blur"),
         .module = module,
+        .connector = { ci, co },
+        .num_connectors = 2,
         .wd     = hwd,
         .ht     = hht,
         .dp     = dp,
-        .num_connectors = 2,
-        .connector = { ci, co },
       };
       if(id_blur_in && *id_blur_in < 0) *id_blur_in = id_blur;
       graph->node[id_blur].connector[0].roi = roi;
@@ -432,11 +464,11 @@ dt_api_blur_sub(
       .name   = dt_token("shared"),
         .kernel = dt_token("resample"),
         .module = module,
+        .connector = { ci, co },
+        .num_connectors = 2,
         .wd     = conn_input->roi.wd,
         .ht     = conn_input->roi.ht,
         .dp     = dp,
-        .num_connectors = 2,
-        .connector = { ci, co },
     };
     graph->node[id_upsample].connector[0].roi = graph->node[nid_input].connector[cid_input].roi;
     CONN(dt_node_connect(graph, nid_input, cid_input, id_upsample, 0));
@@ -475,8 +507,8 @@ dt_api_blur_sep(
     .type   = dt_token("read"),
     .chan   = conn_input->chan,
     .format = conn_input->format,
-    .roi    = conn_input->roi,
     .connected_mi = -1,
+    .roi    = conn_input->roi,
     .array_length = conn_input->array_length,
   };
   dt_connector_t co = {
@@ -494,13 +526,13 @@ dt_api_blur_sep(
     .name   = dt_token("shared"),
     .kernel = blurh,
     .module = module,
+    .connector = { ci, co },
+    .num_connectors = 2,
     .wd     = wd,
     .ht     = ht,
     .dp     = dp,
-    .num_connectors = 2,
-    .connector = { ci, co },
-    .push_constant_size = sizeof(float),
     .push_constant = {irad[0]},
+    .push_constant_size = sizeof(float),
   };
   assert(graph->num_nodes < graph->max_nodes);
   const int id_blurv = graph->num_nodes++;
@@ -508,13 +540,13 @@ dt_api_blur_sep(
     .name   = dt_token("shared"),
     .kernel = blurv,
     .module = module,
+    .connector = { ci, co },
+    .num_connectors = 2,
     .wd     = wd,
     .ht     = ht,
     .dp     = dp,
-    .num_connectors = 2,
-    .connector = { ci, co },
-    .push_constant_size = sizeof(float),
     .push_constant = {irad[0]},
+    .push_constant_size = sizeof(float),
   };
   // interconnect nodes:
   CONN(dt_node_connect(graph, nodeid_input,  connid_input, id_blurh, 0));
@@ -644,24 +676,20 @@ dt_api_guided_filter_full(
     .name   = dt_token("shared"),
     .kernel = dt_token("guided1f"),
     .module = module,
-    .wd     = wd,
-    .ht     = ht,
-    .dp     = dp,
-    .num_connectors = 3,
     .connector = {{
       .name   = dt_token("input"),
       .type   = dt_token("read"),
       .chan   = dt_token("rgba"),
       .format = dt_token("f16"),
-      .roi    = *roi,
       .connected_mi = -1,
+      .roi    = *roi,
     },{
       .name   = dt_token("edges"),
       .type   = dt_token("read"),
       .chan   = dt_token("rgba"),
       .format = dt_token("f16"),
-      .roi    = *roi,
       .connected_mi = -1,
+      .roi    = *roi,
     },{
       .name   = dt_token("output"),
       .type   = dt_token("write"),
@@ -669,6 +697,10 @@ dt_api_guided_filter_full(
       .format = dt_token("f16"),
       .roi    = *roi,
     }},
+    .num_connectors = 3,
+    .wd     = wd,
+    .ht     = ht,
+    .dp     = dp,
   };
 
   // mean_I  = blur(I)
@@ -686,18 +718,14 @@ dt_api_guided_filter_full(
     .name   = dt_token("shared"),
     .kernel = dt_token("guided2f"),
     .module = module,
-    .wd     = wd,
-    .ht     = ht,
-    .dp     = dp,
-    .num_connectors = 2,
     .connector = {{
       .name   = dt_token("input"),
       .type   = dt_token("read"),
       .chan   = dt_token("rgba"),
       .format = dt_token("f16"),
       .flags  = s_conn_smooth,
-      .roi    = *roi,
       .connected_mi = -1,
+      .roi    = *roi,
     },{
       .name   = dt_token("output"),
       .type   = dt_token("write"),
@@ -705,6 +733,10 @@ dt_api_guided_filter_full(
       .format = dt_token("f16"),
       .roi    = *roi,
     }},
+    .num_connectors = 2,
+    .wd     = wd,
+    .ht     = ht,
+    .dp     = dp,
   };
   CONN(dt_node_connect(graph, id_blur1, 1, id_guided2, 0));
 
@@ -720,25 +752,21 @@ dt_api_guided_filter_full(
     .name   = dt_token("shared"),
     .kernel = dt_token("guided3"),
     .module = module,
-    .wd     = wd,
-    .ht     = ht,
-    .dp     = dp,
-    .num_connectors = 3,
     .connector = {{ // original image as input rgba f16
       .name   = dt_token("input"),
       .type   = dt_token("read"),
       .chan   = dt_token("rgba"),
       .format = dt_token("f16"),
-      .roi    = *roi,
       .connected_mi = -1,
+      .roi    = *roi,
     },{ // mean ab
       .name   = dt_token("ab"),
       .type   = dt_token("read"),
       .chan   = dt_token("rg"),
       .format = dt_token("f16"),
       .flags  = s_conn_smooth,
-      .roi    = *roi,
       .connected_mi = -1,
+      .roi    = *roi,
     },{
       .name   = dt_token("output"),
       .type   = dt_token("write"),
@@ -746,6 +774,10 @@ dt_api_guided_filter_full(
       .format = dt_token("f16"),
       .roi    = *roi,
     }},
+    .num_connectors = 3,
+    .wd     = wd,
+    .ht     = ht,
+    .dp     = dp,
   };
   CONN(dt_node_connect(graph, id_blur, 1, id_guided3, 1));
   if(id_out) *id_out = id_guided3;
@@ -788,8 +820,8 @@ dt_api_guided_filter(
     .type   = dt_token("read"),
     .chan   = dt_token("rgba"),
     .format = dt_token("f16"),
-    .roi    = *roi,
     .connected_mi = -1,
+    .roi    = *roi,
   };
   dt_connector_t co = {
     .name   = dt_token("output"),
@@ -808,13 +840,11 @@ dt_api_guided_filter(
     .name   = dt_token("shared"),
     .kernel = dt_token("guided1"),
     .module = module,
+    .connector = { ci, co, },
+    .num_connectors = 2,
     .wd     = wd,
     .ht     = ht,
     .dp     = dp,
-    .num_connectors = 2,
-    .connector = {
-      ci, co,
-    },
   };
 
   // then connect 1x blur:
@@ -834,13 +864,11 @@ dt_api_guided_filter(
     .name   = dt_token("shared"),
     .kernel = dt_token("guided2"),
     .module = module,
+    .connector = { ci, co, },
+    .num_connectors = 2,
     .wd     = wd,
     .ht     = ht,
     .dp     = dp,
-    .num_connectors = 2,
-    .connector = {
-      ci, co,
-    },
   };
 
   CONN(dt_node_connect(graph, id_blur1, 1, id_guided2, 0));
@@ -862,28 +890,26 @@ dt_api_guided_filter(
     .type   = dt_token("read"),
     .chan   = dt_token("rg"),
     .format = dt_token("f16"),
-    .roi    = *roi,
     .connected_mi = -1,
+    .roi    = *roi,
   };
   *node_guided3 = (dt_node_t) {
     .name   = dt_token("shared"),
     .kernel = dt_token("guided3"),
     .module = module,
-    .wd     = wd,
-    .ht     = ht,
-    .dp     = dp,
-    .num_connectors = 3,
     .connector = {
       ci, // - original image as input rgba f16
       cm, // - mean a mean b as rg f16
       co, // - output rgba f16
     },
+    .num_connectors = 3,
+    .wd     = wd,
+    .ht     = ht,
+    .dp     = dp,
   };
   CONN(dt_node_connect(graph, id_blur, 1, id_guided3, 1));
   *exit_nodeid = id_guided3;
 }
-
-#endif // not defined cplusplus
 
 // return modid or -1
 static inline int
@@ -1026,15 +1052,19 @@ dt_module_get_input_img_param(
 // open a file pointer, consider search paths specific to this graph
 static inline FILE*
 dt_graph_open_resource(
-    dt_graph_t *graph,   // graph associated with the module
-    uint32_t    frame,   // optional frame for timelapses, if fname contains "%04d"
-    const char *fname,   // file name template (basename contains exactly "%04d")
-    const char *mode)    // open mode "r" or "w" etc will be passed to fopen
+    const dt_graph_t *graph,   // graph associated with the module
+    uint32_t          frame,   // optional frame for timelapses, if fname contains "%04d"
+    const char       *fname,   // file name template (basename contains exactly "%04d")
+    const char       *mode)    // open mode "r" or "w" etc will be passed to fopen
 {
   char fstr[5] = {0}, *c = 0;
   snprintf(fstr, sizeof(fstr), "%04d", frame); // for security reasons don't use user-supplied fname as format string
   char filename[2*PATH_MAX+10];
+#ifdef _WIN64
+  if(fname[0] == '/' || fname[1] == ':')
+#else
   if(fname[0] == '/')
+#endif
   {
     strncpy(filename, fname, sizeof(filename)-1);
     if((c = strstr(filename, "%04d"))) memcpy(c, fstr, 4);
@@ -1049,6 +1079,7 @@ dt_graph_open_resource(
     // if we can't open it in the graph specific search path, try the home directory:
     snprintf(filename, sizeof(filename), "%s/%s", dt_pipe.homedir, fname);
     if((c = strstr(filename, "%04d"))) memcpy(c, fstr, 4);
+    f = fopen(filename, mode);
     if(f) return f;
     // global basedir
     snprintf(filename, sizeof(filename), "%s/%s", dt_pipe.basedir, fname);
@@ -1062,15 +1093,15 @@ dt_graph_open_resource(
 // returns non-zero on failure.
 static inline int
 dt_graph_get_resource_filename(
-    dt_module_t *mod,
-    const char  *fname,
-    int          frame,
-    char        *ret,
-    size_t       ret_size)
+    const dt_module_t *mod,
+    const char        *fname,
+    int                frame,
+    char              *ret,
+    size_t             ret_size)
 {
   char tmp[2*PATH_MAX+10];
   
-  if(fname[0] != '/') // relative paths
+  if(fname[0] != '/' && fname[1] != ':') // relative paths
   {
     snprintf(tmp, sizeof(tmp), "%s/%s", mod->graph->searchpath, fname);
     snprintf(ret, ret_size, tmp, frame);

@@ -6,6 +6,8 @@
 #include "graph-fwd.h"
 #include <limits.h>
 
+#define DT_MAX_PARAMS_PER_MODULE 30
+
 // static global structs to keep around for all instances of pipelines.
 // this queries the modules on startup, does the dlopen and expensive
 // parsing once, and holds a list for modules to quickly access run time.
@@ -18,14 +20,13 @@ typedef struct dt_read_source_params_t
 }
 dt_read_source_params_t;
 
-typedef struct dt_read_geo_params_t
-{
+typedef struct dt_write_sink_params_t
+{ // future proof arguments
+  int c;              // connector index (on the node)
+  int a;              // array index
   dt_node_t *node;    // the callback lives on the module and needs to identify the real source
-  uint32_t  *idx;     // mmapped index array
-  float     *vtx;     // mmapped vertex array
-  int16_t   *ext;     // mmapped extra data (normals, materials, texture ids, ..)
 }
-dt_read_geo_params_t;
+dt_write_sink_params_t;
 
 typedef struct dt_module_input_event_t
 { // glfw events for modules without linking glfw
@@ -43,14 +44,15 @@ dt_module_input_event_t;
 typedef void (*dt_module_create_nodes_t)  (dt_graph_t *graph, dt_module_t *module);
 typedef void (*dt_module_modify_roi_out_t)(dt_graph_t *graph, dt_module_t *module);
 typedef void (*dt_module_modify_roi_in_t )(dt_graph_t *graph, dt_module_t *module);
-typedef void (*dt_module_write_sink_t) (dt_module_t *module, void *buf);
+typedef void (*dt_module_write_sink_t) (dt_module_t *module, void *buf, dt_write_sink_params_t *p);
 typedef void (*dt_module_read_source_t)(dt_module_t *module, void *buf, dt_read_source_params_t *p);
-typedef void (*dt_module_read_geo_t)(dt_module_t *module, dt_read_geo_params_t *p);
 typedef int  (*dt_module_init_t)    (dt_module_t *module);
 typedef void (*dt_module_cleanup_t )(dt_module_t *module);
+typedef int  (*dt_module_bs_init_t) ();
+typedef void (*dt_module_animate_t)(dt_graph_t *graph, dt_module_t *module);
 typedef void (*dt_module_commit_params_t)(dt_graph_t *graph, dt_module_t *module);
 typedef void (*dt_module_ui_callback_t)(dt_module_t *module, dt_token_t param);
-typedef int  (*dt_module_audio_t)(dt_module_t *module, const int frame, uint16_t **samples);
+typedef int  (*dt_module_audio_t)(dt_module_t *module, uint64_t sample_beg, uint32_t sample_cnt, uint16_t **samples);
 typedef void (*dt_module_input_t)(dt_module_t *module, dt_module_input_event_t *e);
 typedef dt_graph_run_t (*dt_module_check_params_t)(dt_module_t *module, uint32_t parid, uint32_t num, void *oldval);
 
@@ -77,6 +79,9 @@ typedef struct dt_module_so_t
   // creates the nodes for this module after roi negotiations
   dt_module_create_nodes_t create_nodes;
 
+  // animate (optional)
+  dt_module_animate_t animate;
+
   // commit new parameters from module's gui params to binary float blob
   dt_module_commit_params_t commit_params;
 
@@ -92,9 +97,6 @@ typedef struct dt_module_so_t
   // enables input grabbing for modules
   dt_module_input_t input;
 
-  // read geo for constructing ray tracing acceleration structures (optional)
-  dt_module_read_geo_t read_geo;
-
   // for source nodes, will be called before processing starts
   dt_module_read_source_t read_source;
   // for sink nodes, will be called once processing ended
@@ -103,11 +105,13 @@ typedef struct dt_module_so_t
   dt_module_init_t init;
   dt_module_init_t cleanup;
 
+  dt_module_bs_init_t bs_init; // windows module initialisation
+
   dt_connector_t connector[DT_MAX_CONNECTORS];
   int num_connectors;
 
   // pointer to variably-sized parameters
-  dt_ui_param_t *param[30];
+  dt_ui_param_t *param[DT_MAX_PARAMS_PER_MODULE];
   int num_params;
 
   // is this module simple, i.e. has a clear input and output connector chain?
@@ -128,7 +132,9 @@ typedef struct dt_pipe_global_t
 }
 dt_pipe_global_t;
 
-extern dt_pipe_global_t dt_pipe;
+#ifndef VKDT_DSO_BUILD
+VKDT_API extern dt_pipe_global_t dt_pipe;
+#endif
 
 // returns non-zero on failure:
 int dt_pipe_global_init();

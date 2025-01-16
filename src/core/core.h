@@ -6,14 +6,18 @@
 #include <sys/time.h>
 // some random helpers
 
+#ifndef MIN
 #define MIN(a,b) \
 ({ __typeof__ (a) _a = (a); \
    __typeof__ (b) _b = (b); \
    _a < _b ? _a : _b; })
+#endif //MIN
+#ifndef MAX
 #define MAX(a,b) \
 ({ __typeof__ (a) _a = (a); \
    __typeof__ (b) _b = (b); \
    _a > _b ? _a : _b; })
+#endif //MAX
 #define CLAMP(a,m,M) (MIN(MAX((a), (m)), (M)))
 
 // allocates, copies the old data, frees the old buffer p.
@@ -55,7 +59,7 @@ static inline void dt_sanitize_user_string(char *str)
 { // https://wiki.sei.cmu.edu/confluence/display/c/STR02-C.+Sanitize+data+passed+to+complex+subsystems
   static char ok_chars[] = "abcdefghijklmnopqrstuvwxyz"
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    "1234567890_-.@ /";
+    "1234567890_-.@ /:";
   char *cp = str;
   const char *end = str + strlen(str);
   for (cp += strspn(cp, ok_chars); cp != end; cp += strspn(cp, ok_chars))

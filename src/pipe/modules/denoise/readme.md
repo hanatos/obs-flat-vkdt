@@ -23,13 +23,15 @@ you can use the [align](../align/readme.md) module for further noise reduction.
 ## connectors
 
 * `input` the input image can be `rggb` or `rgba`
-* `output` the output image will be the same format as the input
+* `output` the output image either mosaic (normalised with black point subtracted) or full rgb, depending on input
 
 
 ## parameters
 
-* `strength` the overall strength of the wavelet thresholding. this directly scales the unbiased soft shrinkage threshold.
+* `strength` the overall denoising strength. this directly scales the unbiased soft shrinkage threshold in the wavelet method.
 * `luma` this blends back a portion of the original `y` channel after denoising
+* `detail` protect what is detected as detail. use lower values for extremely heavy noise where detail detection fails.
+* `gainmap` if the input file ships metadata about a gainmap, it can be applied here
 
 
 ## examples

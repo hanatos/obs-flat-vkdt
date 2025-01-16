@@ -84,6 +84,46 @@ dt_gui_dr_anim_seek_keyframe_bck()
   dt_gui_dr_anim_seek(g);
 }
 
+// grab the current state of the given parameter/module and insert a keyframe
+// at the current frame of the gui graph. will deduplicate if a keyframe already exists here.
+static inline uint32_t
+dt_gui_keyframe_add(int modid, int parid)
+{
+  dt_graph_t *g = &vkdt.graph_dev;
+  const dt_ui_param_t *param = g->module[modid].so->param[parid];
+  if(!param) return -1u;
+  int count = 1;
+  if(param->name == dt_token("draw"))
+    count = 2*dt_module_param_int(g->module + modid, parid)[0]+1; // vertex count + list of 2d vertices
+  else if(param->widget.cntid == -1)
+    count = param->cnt;
+  else
+    count = CLAMP(dt_module_param_int(g->module + modid, param->widget.cntid)[0], 0, param->cnt);
+  uint32_t ki = -1u;
+  for(uint32_t i=0;ki==-1u&&i<g->module[modid].keyframe_cnt;i++)
+    if(g->module[modid].keyframe[i].param == param->name &&
+       g->module[modid].keyframe[i].frame == g->frame)
+      ki = i;
+  if(ki == -1u)
+  {
+    ki = g->module[modid].keyframe_cnt++;
+    g->module[modid].keyframe = (dt_keyframe_t *)dt_realloc(g->module[modid].keyframe, &g->module[modid].keyframe_size, sizeof(dt_keyframe_t)*(ki+1));
+    g->module[modid].keyframe[ki].beg   = 0;
+    g->module[modid].keyframe[ki].end   = count;
+    g->module[modid].keyframe[ki].frame = g->frame;
+    g->module[modid].keyframe[ki].param = param->name;
+    g->module[modid].keyframe[ki].data  = g->params_pool + g->params_end;
+    g->params_end += dt_ui_param_size(param->type, count);
+    assert(g->params_end <= g->params_max);
+  }
+  memcpy(g->module[modid].keyframe[ki].data, g->module[modid].param + param->offset, dt_ui_param_size(param->type, count));
+  dt_module_keyframe_post_update(g->module+modid);
+  dt_gui_notification("added keyframe for frame %u %" PRItkn ":%" PRItkn ":%" PRItkn, 
+      g->frame, dt_token_str(g->module[modid].name), dt_token_str(g->module[modid].inst), dt_token_str(param->name));
+  dt_graph_history_keyframe(g, modid, ki);
+  return ki;
+}
+
 static inline void
 dt_gui_dr_anim_step_fwd()
 {
@@ -97,7 +137,7 @@ dt_gui_dr_anim_step_bck()
 }
 
 static inline void
-dt_gui_dr_next()
+dt_gui_dr_play()
 {
   if(vkdt.graph_dev.frame_cnt != 1)
   { // start/stop animation
@@ -106,29 +146,38 @@ dt_gui_dr_next()
     else
       dt_gui_dr_anim_stop();
   }
-  else
-  { // advance to next image in lighttable collection
-    uint32_t next = dt_db_current_colid(&vkdt.db) + 1;
-    if(next < vkdt.db.collection_cnt)
-    {
-      int err;
-      err = darkroom_leave(); // writes back thumbnails. maybe there'd be a cheaper way to invalidate.
-      if(err) return;
+}
+
+static inline void
+dt_gui_dr_next()
+{ // advance to next image in lighttable collection
+  uint32_t next = dt_db_current_colid(&vkdt.db) + 1;
+  if(next < vkdt.db.collection_cnt)
+  {
+    int err;
+    err = darkroom_leave(); // writes back thumbnails. maybe there'd be a cheaper way to invalidate.
+    if(err) return;
+    dt_db_selection_clear(&vkdt.db);
+    dt_db_selection_add(&vkdt.db, next);
+    err = darkroom_enter();
+    if(err)
+    { // roll back
       dt_db_selection_clear(&vkdt.db);
-      dt_db_selection_add(&vkdt.db, next);
-      err = darkroom_enter();
-      if(err)
-      { // roll back
-        dt_db_selection_clear(&vkdt.db);
-        dt_db_selection_add(&vkdt.db, next-1);
-        darkroom_enter(); // hope they take us back
-      }
+      dt_db_selection_add(&vkdt.db, next-1);
+      darkroom_enter(); // hope they take us back
     }
   }
 }
 
 static inline void
-dt_gui_dr_prev()
+dt_gui_dr_next_or_play()
+{
+  if(vkdt.graph_dev.frame_cnt != 1) dt_gui_dr_play();
+  else dt_gui_dr_next();
+}
+
+static inline void
+dt_gui_dr_rewind()
 {
   if(vkdt.graph_dev.frame_cnt != 1)
   {
@@ -138,25 +187,72 @@ dt_gui_dr_prev()
     dt_graph_apply_keyframes(&vkdt.graph_dev); // rerun once
     dt_gui_dr_anim_stop();
   }
-  else
-  { // backtrack to last image in lighttable collection
-    int32_t next = dt_db_current_colid(&vkdt.db) - 1;
-    if(next >= 0)
-    {
-      int err;
-      err = darkroom_leave(); // writes back thumbnails. maybe there'd be a cheaper way to invalidate.
-      if(err) return;
+}
+
+static inline void
+dt_gui_dr_prev()
+{ // backtrack to last image in lighttable collection
+  int32_t next = dt_db_current_colid(&vkdt.db) - 1;
+  if(next >= 0)
+  {
+    int err;
+    err = darkroom_leave(); // writes back thumbnails. maybe there'd be a cheaper way to invalidate.
+    if(err) return;
+    dt_db_selection_clear(&vkdt.db);
+    dt_db_selection_add(&vkdt.db, next);
+    err = darkroom_enter();
+    if(err)
+    { // roll back
       dt_db_selection_clear(&vkdt.db);
-      dt_db_selection_add(&vkdt.db, next);
-      err = darkroom_enter();
-      if(err)
-      { // roll back
-        dt_db_selection_clear(&vkdt.db);
-        dt_db_selection_add(&vkdt.db, next+1);
-        darkroom_enter(); // hope they take us back
-      }
+      dt_db_selection_add(&vkdt.db, next+1);
+      darkroom_enter(); // hope they take us back
     }
   }
+}
+
+static inline void
+dt_gui_dr_prev_or_rewind()
+{
+  if(vkdt.graph_dev.frame_cnt != 1) dt_gui_dr_rewind();
+  else dt_gui_dr_prev();
+}
+
+static inline void
+dt_gui_dr_advance_rate(int rate)
+{ // advance to next image in lighttable collection, and apply rating offset
+  assert(vkdt.view_mode == s_view_darkroom);
+  const uint32_t ci = dt_db_current_imgid(&vkdt.db);
+  if(ci != -1u) vkdt.db.image[ci].rating = CLAMP(vkdt.db.image[ci].rating + rate, 0, 5);
+
+  uint32_t next = dt_db_current_colid(&vkdt.db) + 1;
+  if(next < vkdt.db.collection_cnt)
+  {
+    int err;
+    err = darkroom_leave(); // writes back thumbnails. maybe there'd be a cheaper way to invalidate.
+    if(err) return;
+    dt_db_selection_clear(&vkdt.db);
+    dt_db_selection_add(&vkdt.db, next);
+    err = darkroom_enter();
+    if(err)
+    { // roll back
+      dt_db_selection_clear(&vkdt.db);
+      dt_db_selection_add(&vkdt.db, next-1);
+      darkroom_enter(); // hope they take us back
+    }
+  }
+  else dt_gui_notification("reached the end of the collection");
+}
+
+static inline void
+dt_gui_dr_advance_downvote()
+{
+  dt_gui_dr_advance_rate(-1);
+}
+
+static inline void
+dt_gui_dr_advance_upvote()
+{
+  dt_gui_dr_advance_rate(1);
 }
 
 // assumes the crop start button has been pressed and we're in crop mode in the ui
@@ -228,15 +324,15 @@ dt_gui_dr_toggle_fullscreen_view()
   {
     vkdt.state.center_x = 0;
     vkdt.state.center_y = 0;
-    vkdt.state.center_wd = qvk.win_width;
-    vkdt.state.center_ht = qvk.win_height;
+    vkdt.state.center_wd = vkdt.win.width;
+    vkdt.state.center_ht = vkdt.win.height;
   }
   else
   {
-    vkdt.state.center_x = vkdt.style.border_frac * qvk.win_width;
-    vkdt.state.center_y = vkdt.style.border_frac * qvk.win_width;
-    vkdt.state.center_wd = qvk.win_width * (1.0f-2.0f*vkdt.style.border_frac) - vkdt.state.panel_wd;
-    vkdt.state.center_ht = qvk.win_height - 2*vkdt.style.border_frac * qvk.win_width;
+    vkdt.state.center_x = vkdt.style.border_frac * vkdt.win.height;
+    vkdt.state.center_y = vkdt.style.border_frac * vkdt.win.height;
+    vkdt.state.center_wd = vkdt.win.width  - 2.0f*vkdt.style.border_frac * vkdt.win.height - vkdt.state.panel_wd;
+    vkdt.state.center_ht = vkdt.win.height * (1.0f-2.0f*vkdt.style.border_frac); 
   }
 }
 
@@ -258,17 +354,17 @@ dt_gui_dr_toggle_history()
   vkdt.wstate.history_view ^= 1;
   if(vkdt.wstate.history_view)
   {
-    vkdt.state.center_x = vkdt.style.border_frac * qvk.win_width + vkdt.state.panel_wd;
-    vkdt.state.center_y = vkdt.style.border_frac * qvk.win_width;
-    vkdt.state.center_wd = qvk.win_width * (1.0f-2.0f*vkdt.style.border_frac) - 2*vkdt.state.panel_wd;
-    vkdt.state.center_ht = qvk.win_height - 2*vkdt.style.border_frac * qvk.win_width;
+    vkdt.state.center_x = vkdt.style.border_frac * vkdt.win.height + vkdt.state.panel_wd;
+    vkdt.state.center_y = vkdt.style.border_frac * vkdt.win.height;
+    vkdt.state.center_wd = vkdt.win.width  - 2.0f*vkdt.style.border_frac * vkdt.win.height - 2*vkdt.state.panel_wd;
+    vkdt.state.center_ht = vkdt.win.height * (1.0f-2.0f*vkdt.style.border_frac); 
   }
   else
   {
-    vkdt.state.center_x = vkdt.style.border_frac * qvk.win_width;
-    vkdt.state.center_y = vkdt.style.border_frac * qvk.win_width;
-    vkdt.state.center_wd = qvk.win_width * (1.0f-2.0f*vkdt.style.border_frac) - vkdt.state.panel_wd;
-    vkdt.state.center_ht = qvk.win_height - 2*vkdt.style.border_frac * qvk.win_width;
+    vkdt.state.center_x = vkdt.style.border_frac * vkdt.win.height;
+    vkdt.state.center_y = vkdt.style.border_frac * vkdt.win.height;
+    vkdt.state.center_wd = vkdt.win.width  - 2.0f*vkdt.style.border_frac * vkdt.win.height - vkdt.state.panel_wd;
+    vkdt.state.center_ht = vkdt.win.height * (1.0f-2.0f*vkdt.style.border_frac); 
   }
 }
 
@@ -336,27 +432,30 @@ dt_gui_lt_duplicate()
   dt_gui_switch_collection(dir);
 }
 
+// this only takes care of in/out chain reconnections when a module is removed.
+// the module removal will take care of the rest.
 static inline int
 dt_gui_dr_disconnect_module(int m)
 {
-  int id_dspy = dt_module_get(&vkdt.graph_dev, dt_token("display"), dt_token("dspy"));
-  if(id_dspy >= 0) dt_module_connect(&vkdt.graph_dev, -1, -1, id_dspy, 0); // no history
-  vkdt.graph_dev.runflags = s_graph_run_all;
+  dt_graph_t *graph = &vkdt.graph_dev;
+  int id_dspy = dt_module_get(graph, dt_token("display"), dt_token("dspy"));
+  if(id_dspy >= 0) dt_module_connect(graph, -1, -1, id_dspy, 0); // no history
+  graph->runflags = s_graph_run_all;
 
   int ret = 0;
-  dt_module_t *mod = vkdt.graph_dev.module + m;
+  dt_module_t *mod = graph->module + m;
   if(mod->so->has_inout_chain)
   {
-    int m_after[10], c_after[10], max_after = 10;
-    int c_prev, m_prev = dt_module_get_module_before(mod->graph, mod, &c_prev);
-    int cnt = dt_module_get_module_after(mod->graph, mod, m_after, c_after, max_after);
+    int m_after[DT_MAX_CONNECTORS], c_after[DT_MAX_CONNECTORS], max_after = DT_MAX_CONNECTORS;
+    int c_prev, m_prev = dt_module_get_module_before(graph, mod, &c_prev);
+    int cnt = dt_module_get_module_after(graph, mod, m_after, c_after, max_after);
     if(m_prev != -1 && cnt > 0)
     {
       int c_our = dt_module_get_connector(mod, dt_token("input"));
-      ret = dt_module_connect_with_history(mod->graph, -1, -1, m, c_our);
+      ret = dt_module_connect_with_history(graph, -1, -1, m, c_our);
       for(int k=0;k<cnt;k++)
         if(!ret)
-          ret = dt_module_connect_with_history(mod->graph, m_prev, c_prev, m_after[k], c_after[k]);
+          ret = dt_module_connect_with_history(graph, m_prev, c_prev, m_after[k], c_after[k]);
     }
   }
   return ret;
@@ -366,7 +465,7 @@ static inline void
 dt_gui_dr_remove_module(int m)
 {
   dt_gui_dr_disconnect_module(m);
-  dt_module_remove(&vkdt.graph_dev, m);
+  dt_module_remove_with_history(&vkdt.graph_dev, vkdt.graph_dev.module[m].name, vkdt.graph_dev.module[m].inst);
 }
 
 static inline void
@@ -482,7 +581,7 @@ dt_gui_dr_draw_position(
       vx[v] = dt_draw_vertex(xi, yi, pressure * radius, opacity, hardness);
     }
     // trigger draw list upload and recomputation:
-    vkdt.graph_dev.runflags = s_graph_run_record_cmd_buf | s_graph_run_upload_source | s_graph_run_wait_done;
+    vkdt.graph_dev.runflags = s_graph_run_record_cmd_buf;
     vkdt.graph_dev.module[vkdt.wstate.active_widget_modid].flags = s_module_request_read_source;
   }
   else

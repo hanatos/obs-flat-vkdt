@@ -1,21 +1,23 @@
-# modules in the image processing graph
+# module reference documentation
 
 image processing is done in a DAG with potentially multiple sources and multiple sinks.
 the graph does in fact not strictly have to be acyclic, we allow `feedback` connectors
 for iterative/multi-frame execution.
 
 ## list of modules
-it follows the current list of available modules.
+it follows the reference documentation of available modules, grouped into categories.
+also see the [list of presets shipped with vkdt](../../../doc/howto/presets/presets.md).
 
 **input**
 
 * [i-bc1: input module for bc1-compressed thumbnails](./i-bc1/readme.md)
 * [i-exr: input openexr images](./i-exr/readme.md)
-* [i-geo: input binary 3d geometry as ssbo connector](./i-geo/readme.md)
 * [i-jpg: jpg input module](./i-jpg/readme.md)
 * [i-jpglst: input a longer list of jpg as an array connector](./i-jpglst/readme.md)
 * [i-lut: half float lut input module](./i-lut/readme.md)
+* [i-mcraw: read motioncam raw video](./i-mcraw/readme.md)
 * [i-mlv: magic lantern raw video input module](./i-mlv/readme.md)
+* [i-obj: load triangle meshes from wavefront obj files](./i-obj/readme.md)
 * [i-pfm: 32-bit floating point map input module](./i-pfm/readme.md)
 * [i-raw: input module for raw-format photographic stills or timelapses](./i-raw/readme.md)
 * [i-v4l2: webcam input module](./i-v4l2/readme.md)
@@ -24,12 +26,14 @@ it follows the current list of available modules.
 **output**
 
 * [o-bc1: write bc1 compressed thumbnail files](./o-bc1/readme.md)
+* [o-copy: copy the input file to a new destination](./o-copy/readme.md)
 * [o-exr: write openexr image files](./o-exr/readme.md)
-* [o-ffmpeg: write h264 compressed video stream for multi-frame input](./o-ffmpeg/readme.md)
 * [o-jpg: write jpeg compressed still image](./o-jpg/readme.md)
 * [o-lut: write varying precision multi channel luts](./o-lut/readme.md)
 * [o-null: write absolutely nothing](./o-null/readme.md)
 * [o-pfm: write uncompressed 32-bit floating point image](./o-pfm/readme.md)
+* [o-vid: write h264 or prores compressed video streams](./o-vid/readme.md)
+* [o-web: transitional module for jpg and mp4 for webpages](./o-web/readme.md)
 * [loss: compute loss for optimisation](./loss/readme.md)
 
 **visualisation and inspection**
@@ -42,6 +46,7 @@ it follows the current list of available modules.
 * [pick: colour picker and visualisation tool](./pick/readme.md)
 * [rawhist: raw histogram with estimated noise levels](./rawhist/readme.md)
 * [test10b: render a gradient prone to banding to test 10 bit displays and dithering](./test10b/readme.md)
+* [vis: convert linear input to srgb colour ramp for visualisation](./vis/readme.md)
 * [y2rgb: visualise first channel in grey scale](./y2rgb/readme.md)
 
 **raw processing**
@@ -49,9 +54,11 @@ it follows the current list of available modules.
 * [ca: correct chromatic aberrations](./ca/readme.md)
 * [demosaic: demosaic bayer or x-trans raw files](./demosaic/readme.md)
 * [hilite: highlight reconstruction based on local inpainting](./hilite/readme.md)
+* [jddcnn: joint demosaicing and denoising via neural network](./jddcnn/readme.md)
 
 **colour processing**
 
+* [colenc: encode colour for colour managed output like adobeRGB, P3, etc](./colenc/readme.md)
 * [colour: generic colour manipulation/input transform](./colour/readme.md)
 * [grade: simple ACES CDL grading tool](./grade/readme.md)
 
@@ -62,8 +69,10 @@ it follows the current list of available modules.
 * [deconv: deconvolution sharpening](./deconv/readme.md)
 * [denoise: noise reduction based on edge-aware wavelets and noise profiles](./denoise/readme.md)
 * [hotpx: remove impulse noise/stuck pixels](./hotpx/readme.md)
+* [kpn: kernel prediction neural network for denoising](./kpn/readme.md)
 * [lens: lens distortion correction](./lens/readme.md)
 * [negative: invert film negatives](./negative/readme.md)
+* [usm: unsharp masking sharpening](./usm/readme.md)
 
 **tone**
 
@@ -87,20 +96,26 @@ it follows the current list of available modules.
 **effects**
 
 * [frame: postcard-style decor border around the image](./frame/readme.md)
+* [grain: simulate analog film grain](./grain/readme.md)
 
 **technical**
 
 * [align: align animation frames or burst photographs](./align/readme.md)
 * [blend: masked frame blending](./blend/readme.md)
-* [cnn: convolutional neural network](./cnn/readme.md)
+* [cnngenin: generate random input for neural network training](./cnngenin/readme.md)
+* [format: change texture format (number of channels and data type)](./format/readme.md)
 * [f2srgb: convert linear floating point data to 8-bit sRGB for output](./f2srgb/readme.md)
+* [kpn-t: kernel prediction neural network for denoising, training](./kpn-t/readme.md)
 * [mv2rot: estimate rotation + translation from motion vectors](./mv2rot/readme.md)
 * [resize: add ability to resize buffers](./resize/readme.md)
+* [resnet: gmic convolutional neural network](./resnet/readme.md)
 * [srgb2f: convert sRGB input to linear rec2020 floating point](./srgb2f/readme.md)
 
 **3d rendering**
 
 * [accum: accumulate frames in a frame buffer](./accum/readme.md)
+* [bvh: append triangle mesh to ray tracing acceleration structure](./bvh/readme.md)
+* [logo: render the animated vkdt icon](./logo/readme.md)
 * [quake: the 1996 game ray traced based on QSS](./quake/readme.md)
 * [rt: real-time ray tracing](./rt/readme.md)
 * [spheres: shadertoy demo ported for testing](./spheres/readme.md)
@@ -124,10 +139,10 @@ by default, a raw image is passed through the following pipeline:
 * `filmcurv`: film style tone curve
 * `llap`: local contrast, shadows, and highlights
 
-you can change the default pipeline by hacking `bin/default-darkroom.i-raw` for
-darkroom mode and `bin/default.i-raw` for thumbnails. the `i-raw` suffix
-indicates that the file will be used for raw input, there is also the
-equivalent `i-mlv` version for raw video.
+you can change the default pipeline by hacking `default-darkroom.i-raw` (either
+in the vkdt basedir or the homedir) for darkroom mode and `default.i-raw`
+for thumbnails. the `i-raw` suffix indicates that the file will be used for raw
+input, there is also the equivalent `i-mlv` version for raw video.
 
 
 ## files to describe a module

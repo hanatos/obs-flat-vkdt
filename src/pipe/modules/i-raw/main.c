@@ -2,9 +2,12 @@
 #include "mat3.h"
 #include "rawloader-c/rawloader.h"
 #include "core/log.h"
+#include "dng_opcode.h"
 
 #include <stdio.h>
 #include <time.h>
+
+#include "dng_opcode_decode.c"
 
 typedef struct rawinput_buf_t
 {
@@ -13,6 +16,8 @@ typedef struct rawinput_buf_t
   char filename[PATH_MAX];
   int frame;
   int ox, oy;
+  dt_dng_opcode_list_t *dng_opcode_lists[3];
+  dt_image_metadata_dngop_t dngop;
 }
 rawinput_buf_t;
   
@@ -21,6 +26,13 @@ free_raw(dt_module_t *mod)
 {
   rawinput_buf_t *mod_data = (rawinput_buf_t *)mod->data;
   rl_deallocate(mod_data->img.data, mod_data->len);
+  mod_data->img.data = 0;
+  mod_data->len = 0;
+  for(int i=0;i<3;i++)
+  {
+    dng_opcode_list_free(mod_data->dng_opcode_lists[i]);
+    mod_data->dng_opcode_lists[i] = NULL;
+  }
   mod_data->filename[0] = 0;
 }
 
@@ -44,6 +56,37 @@ load_raw(
   dt_log(s_log_perf, "[rawloader] load %s in %3.0fms", filename, 1000.0*(end-beg)/CLOCKS_PER_SEC);
   snprintf(mod_data->filename, sizeof(mod_data->filename), "%s", filename);
   mod_data->frame = frame;
+
+  int have_dngop = 0;
+  for(int i=0;i<3;i++)
+  {
+    if(mod_data->img.dng_opcode_lists_len[i] > 0)
+    {
+      // decode the raw opcode list into C structures we can access directly
+      mod_data->dng_opcode_lists[i] = dng_opcode_list_decode(
+        mod_data->img.dng_opcode_lists[i], mod_data->img.dng_opcode_lists_len[i]);
+      // free the raw opcode list now that we have decoded it
+      rl_deallocate(mod_data->img.dng_opcode_lists[i], mod_data->img.dng_opcode_lists_len[i]);
+      mod_data->img.dng_opcode_lists[i] = 0;
+      mod_data->img.dng_opcode_lists_len[i] = 0;
+      have_dngop = 1;
+    }
+  }
+  if(have_dngop)
+  {
+    mod_data->dngop = (dt_image_metadata_dngop_t){
+      .type = s_image_metadata_dngop,
+      .ox   = mod_data->img.cfa_off_x,
+      .oy   = mod_data->img.cfa_off_y,
+      .op_list = {
+        mod_data->dng_opcode_lists[0],
+        mod_data->dng_opcode_lists[1],
+        mod_data->dng_opcode_lists[2],
+      },
+    };
+    mod->img_param.meta = dt_metadata_append(mod->img_param.meta, (void*)&mod_data->dngop);
+  }
+  else mod->img_param.meta = 0;
   return 0;
 error:
   dt_log(s_log_err, "[i-raw] failed to load raw file %s!\n", fname);
@@ -62,7 +105,7 @@ int init(dt_module_t *mod)
 void cleanup(dt_module_t *mod)
 {
   if(!mod->data) return;
-  rawinput_buf_t *mod_data = (rawinput_buf_t *)mod->data;
+  rawinput_buf_t *mod_data = mod->data;
   free_raw(mod);
   free(mod_data);
   mod->data = 0;
@@ -111,6 +154,8 @@ void modify_roi_out(
 
   for(int k=0;k<9;k++)
     mod->img_param.cam_to_rec2020[k] = 0.0f/0.0f; // mark as uninitialised
+  mod->img_param.colour_primaries = s_colour_primaries_custom;
+  mod->img_param.colour_trc       = s_colour_trc_linear;
 
   // set a bit of metadata from rawspeed, overwrite exiv2 because this one is more consistent:
   snprintf(mod->img_param.maker, sizeof(mod->img_param.maker), "%s", mod_data->img.clean_maker);
@@ -164,7 +209,14 @@ void modify_roi_out(
   mod->img_param.whitebalance[1] = 1.0f;
   mod->img_param.filters = mod_data->img.filters;
 
-  if(isnanf(mod->img_param.cam_to_rec2020[0]))
+  if(mod_data->img.cpp == 3)
+  {
+    mod->connector[0].chan = dt_token("rgba");
+    mod->img_param.filters = 0;
+  }
+
+  float test = mod->img_param.cam_to_rec2020[0];
+  if(!(test == test))
   { // camera matrix not found in exif or compiled without exiv2
     float xyz_to_cam[12], mat[9] = {0};
     // get d65 camera matrix from rawloader
@@ -204,7 +256,7 @@ int read_source(
     return 1;
   int err = load_raw(mod, id + mod->graph->frame, filename);
   if(err) return 1;
-  // TODO: if img.data_type == 1 it's a f32 buffer instead.
+  // TODO: if img.data_type == 1 it's an f32 buffer instead.
   uint16_t *buf = (uint16_t *)mapped;
 
   // dimensions of uncropped image
@@ -212,10 +264,22 @@ int read_source(
   int wd = mod_data->img.width;
   int ht = mod_data->img.height;
 
+  int icpp = mod_data->img.cpp;
+  int ocpp = icpp == 3 ? 4 : 1;
   int ox = mod_data->img.cfa_off_x;
   int oy = mod_data->img.cfa_off_y;
-  int stride = mod_data->img.stride;
-  for(int j=0;j<ht;j++)
-    memcpy(buf + j*wd, ((uint16_t*)mod_data->img.data) + (j+oy)*stride + ox, sizeof(uint16_t)*wd);
+  int stride = mod_data->img.stride * icpp;
+  if(icpp == 1)
+    for(int j=0;j<ht;j++)
+      memcpy(buf + j*wd, ((uint16_t*)mod_data->img.data) + (j+oy)*stride + ox, sizeof(uint16_t)*wd);
+  if(ocpp == 4)
+  {
+    for(int j=0;j<ht;j++) for(int i=0;i<wd;i++)
+    {
+      for(int k=0;k<3;k++)
+        buf[4*(j*wd + i)+k] = ((uint16_t*)mod_data->img.data)[(j+oy)*stride + icpp*(ox + i) + k];
+      buf[4*(j*wd + i)+3] = 1.0;
+    }
+  }
   return 0;
 }

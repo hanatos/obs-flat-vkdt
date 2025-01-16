@@ -11,8 +11,6 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/time.h>
-#include <sys/mman.h>
-#include <sys/ioctl.h>
 
 #include "video_mlv.c"
 
@@ -62,7 +60,7 @@ open_file(
   if(dat && !strcmp(dat->filename, fname))
     return 0; // already open
 
-  fprintf(stderr, "[o-mlv] opening `%s'\n", fname);
+  fprintf(stderr, "[i-mlv] opening `%s'\n", fname);
 
   const char *filename = fname;
   char tmpfn[2*PATH_MAX+10]; // replicate api.h:dt_graph_open_resource
@@ -161,8 +159,8 @@ void modify_roi_out(
       dat->video.RTCI.tm_year, dat->video.RTCI.tm_mon, dat->video.RTCI.tm_mday,
       dat->video.RTCI.tm_hour, dat->video.RTCI.tm_min, dat->video.RTCI.tm_sec);
 #pragma GCC diagnostic pop
-  snprintf(mod->img_param.model, sizeof(mod->img_param), "%s", dat->video.IDNT.cameraName);
-  snprintf(mod->img_param.maker, sizeof(mod->img_param), "%s", dat->video.IDNT.cameraName);
+  snprintf(mod->img_param.model, sizeof(mod->img_param.model), "%s", dat->video.IDNT.cameraName);
+  snprintf(mod->img_param.maker, sizeof(mod->img_param.maker), "%s", dat->video.IDNT.cameraName);
   for(int i=0;i<sizeof(mod->img_param.maker);i++) if(mod->img_param.maker[i] == ' ') mod->img_param.maker[i] = 0;
   mod->graph->frame_cnt  = dat->video.MLVI.videoFrameCount;
   mod->graph->frame_rate = dat->video.frame_rate;
@@ -230,18 +228,17 @@ int read_source(
 
 int audio(
     dt_module_t  *mod,
-    const int     frame,
+    uint64_t      sample_beg,
+    uint32_t      sample_cnt,
     uint8_t     **samples)
 {
   buf_t *dat = mod->data;
   if(!dat || !dat->filename[0] || !dat->video.audio_data || !dat->video.audio_size)
     return 0;
-  uint64_t bytes_per_frame = dat->video.WAVI.bytesPerSecond / dat->video.frame_rate;
-  *samples = dat->video.audio_data + frame * bytes_per_frame;
+  int bytes_per_sample = dat->video.WAVI.bytesPerSecond / dat->video.WAVI.samplingRate;
+  *samples = dat->video.audio_data + sample_beg * bytes_per_sample;
+  if(*samples >= dat->video.audio_data + dat->video.audio_size) return 0;
 
-  bytes_per_frame = MIN(bytes_per_frame, 
-    MAX(0, dat->video.audio_data + dat->video.audio_size - *samples));
-
-  // samples: stereo and 2 bytes/channel => /4
-  return bytes_per_frame/4;
+  return MIN(sample_cnt, 
+    MAX(0, dat->video.audio_data + dat->video.audio_size - *samples))/bytes_per_sample;
 }

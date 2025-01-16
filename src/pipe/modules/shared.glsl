@@ -1,4 +1,10 @@
 #include "localsize.h"
+#define M_PI   3.14159265358979323846
+
+float clamps(float v, float m, float M)
+{ // opposite to the definition of clamp this one never passes on v in case of NaN (but clamps to M instead)
+  return max(m, min(M, v));
+}
 
 // http://vec3.ca/bicubic-filtering-in-fewer-taps/
 vec4 sample_catmull_rom(sampler2D tex, vec2 uv)
@@ -110,6 +116,48 @@ float luminance_rec2020(vec3 rec2020)
   return dot(vec3(2.62700212e-01, 6.77998072e-01, 5.93017165e-02), rec2020);
 }
 
+// full 4-wide version, passing through all channels:
+vec4 sample_flower4(sampler2D tex, vec2 uv)
+{
+  vec2 texSize = textureSize(tex, 0);
+  vec2 tc = uv * texSize;
+
+  vec2 off0 = vec2( 1.2, 0.4);
+  vec2 off1 = vec2(-0.4, 1.2);
+
+  const float t = 36.0/256.0;
+  vec4 result = vec4(0);
+#define LOAD(T, W)\
+  do {\
+    vec4 v = textureLod(tex, T, 0);\
+    result += W * v;\
+  } while(false)
+  LOAD(uv, t);
+  LOAD((tc+off0)/texSize, (1.0-t)/4.0);
+  LOAD((tc-off0)/texSize, (1.0-t)/4.0);
+  LOAD((tc+off1)/texSize, (1.0-t)/4.0);
+  LOAD((tc-off1)/texSize, (1.0-t)/4.0);
+  return result;
+}
+
+vec4 sample_flower_adj4(sampler2D tex, vec2 uv)
+{
+  vec2 texSize = textureSize(tex, 0);
+  vec2 tc = uv * texSize;
+
+  vec2 off0 = vec2( 1.2, -0.4);
+  vec2 off1 = vec2( 0.4,  1.2);
+
+  const float t = 36.0/256.0;
+  vec4 result = vec4(0);
+  LOAD(uv, t);
+  LOAD((tc+off0)/texSize, (1.0-t)/4.0);
+  LOAD((tc-off0)/texSize, (1.0-t)/4.0);
+  LOAD((tc+off1)/texSize, (1.0-t)/4.0);
+  LOAD((tc-off1)/texSize, (1.0-t)/4.0);
+#undef LOAD
+  return result;
+}
 // almost 5x5 support in 5 taps
 vec4 sample_flower(sampler2D tex, vec2 uv)
 {
@@ -123,7 +171,7 @@ vec4 sample_flower(sampler2D tex, vec2 uv)
   vec4 result = vec4(0);
 #define LOAD(T, W)\
   do {\
-    vec4 v = textureLod(tex, T, 0);\
+    vec4 v = texture(tex, T);\
     float l = max(v.r, max(v.g, v.b));\
     result += vec4(W*v.rgb, W*l*l);\
   } while(false)
@@ -173,6 +221,36 @@ vec3 xyY_to_rec2020(vec3 xyY)
    -0.35567078,  1.61648124, -0.04277061,
    -0.25336628,  0.01576855,  0.94210312);
   return xyz_to_rec2020 * xyz;
+}
+
+vec3 rec2020_to_oklab(vec3 rgb)
+{
+  mat3 M = mat3( // M1 * rgb_to_xyz
+      0.61668844, 0.2651402 , 0.10015065,
+      0.36015907, 0.63585648, 0.20400432,
+      0.02304329, 0.09903023, 0.69632468);
+  vec3 lms = M * rgb;
+  lms = pow(max(vec3(0.0), lms), vec3(1.0/3.0));
+  mat3 M2 = mat3(
+      0.21045426,  1.9779985 ,  0.02590404,
+      0.79361779, -2.42859221,  0.78277177,
+     -0.00407205,  0.45059371, -0.80867577);
+  return M2 * lms;
+}
+
+vec3 oklab_to_rec2020(vec3 oklab)
+{
+  mat3 M2inv = mat3(
+      1.        ,  1.00000001,  1.00000005,
+      0.39633779, -0.10556134, -0.08948418,
+      0.21580376, -0.06385417, -1.29148554);
+  vec3 lms = M2inv * oklab;
+  lms = lms*lms*lms;
+  mat3 M = mat3( // = xyz_to_rec2020 * M1inv
+      2.14014041, -0.88483245, -0.04857906,
+     -1.24635595,  2.16317272, -0.45449091,
+      0.10643173, -0.27836159,  1.50235629);
+  return M * lms;
 }
 
 // (c) christoph peters:
@@ -328,19 +406,22 @@ float mrand(inout uint seed)
   return seed / 4294967296.0;
 }
 
+// since hsv is a severely broken concept, we mean oklab LCh (or hCL really)
 vec3 rgb2hsv(vec3 c)
 {
-  vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
-  vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
-  vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
-  float d = q.x - min(q.w, q.y);
-  float e = 1.0e-6;
-  return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+  vec3 oklab = rec2020_to_oklab(c);
+  return vec3(fract(1.0 + atan(oklab.z, oklab.y)/(2.0*M_PI)), length(oklab.yz), oklab.x);
 }
 
-vec3 hsv2rgb(vec3 c)
+vec3 hsv2rgb(vec3 hCL)
 {
-  vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-  vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-  return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+  vec3 oklab = vec3(hCL.z, hCL.y * cos(2.0*M_PI*hCL.x), hCL.y * sin(2.0*M_PI*hCL.x));
+  if(oklab.x <= 0.0) return vec3(0);
+  return oklab_to_rec2020(oklab);
+}
+
+vec2 warp_gaussian(vec2 xi)
+{ // warp two uniform [0,1) random variables to two standard normal distributed ones (box muller transform)
+  // use 1-x instead of x to avoid log(0)
+  return sqrt(-2.0*log(1.0-xi.x))*vec2(cos(2.0*M_PI*xi.y), sin(2.0*M_PI*xi.y));
 }

@@ -79,11 +79,11 @@ typedef struct dt_graph_t
   VkDescriptorPool      dset_pool;
   VkCommandBuffer       command_buffer[2];   // two per graph, to interleave cpu load, uploads and gpu compute
   VkCommandPool         command_pool;
-  VkFence               command_fence[2];    // one per command buffer
-  VkQueue               queue;
-  void                 *queue_mutex;         // if this is set to != 0 will be locked when the queue is used
-  uint32_t              queue_idx;
-  int                   float_atomics_supported; // copy from qvk to pass down to modules
+  VkSemaphore           semaphore_display;   // timeline semaphore to keep track of commands that use the backbuffer images
+  uint64_t              display_dbuffer[2];  // indicate the largest display timeline position currently reading double buffer 0 or 1
+  VkSemaphore           semaphore_process;   // timeline semaphore indicating that graph processing/double buffer write access is done
+  uint64_t              process_dbuffer[2];  // timestamps indicating that processing will be done for double buffer 0 or 1
+  qvk_queue_name_t      queue_name;
 
   VkBuffer              uniform_buffer;      // uniform buffer shared between all nodes
   VkDeviceMemory        vkmem_uniform;
@@ -113,14 +113,18 @@ typedef struct dt_graph_t
   int                   frame_cnt;     // number of frames to compute
   double                frame_rate;    // frame rate (frames per second)
 
+  // index of the currently written double buffer channel for s_conn_double_buffer connectors.
+  // graph_run will pick this value up and use the dsets for writing.
+  // this also selects the command buffer/fence for interleaved processing.
+  int                   double_buffer;
+
   // scale output resolution to fit and copy the main display to the given buffer:
   VkImage               thumbnail_image;
-  int                   output_wd;
-  int                   output_ht;
   void                 *io_mutex;      // if this is set to != 0 will be locked during read_source() calls
 
   int                   gui_attached;  // can't free the output images while still used etc.
   const char           *gui_msg;       // will result in a dt_gui_notification call if not zero
+  char                  gui_msg_buf[100];
   char                  searchpath[PATH_MAX];
   char                  basedir[PATH_MAX];// copy of the global search directory such that modules can access it
 
@@ -131,9 +135,9 @@ typedef struct dt_graph_t
 }
 dt_graph_t;
 
-void dt_graph_init(dt_graph_t *g);     // init
-void dt_graph_cleanup(dt_graph_t *g);  // cleanup, free memory
-void dt_graph_reset(dt_graph_t *g);    // lightweight reset, keep allocations
+void dt_graph_init(dt_graph_t *g, qvk_queue_name_t qname); // init
+void dt_graph_cleanup(dt_graph_t *g);                      // cleanup, free memory
+void dt_graph_reset(dt_graph_t *g);                        // lightweight reset, keep allocations
 
 dt_node_t *dt_graph_get_display(dt_graph_t *g, dt_token_t  which);
 
@@ -157,12 +161,11 @@ dt_graph_connector_image(
     int         nid,    // node id
     int         cid,    // connector id
     int         array,  // array index
-    int         frame); // frame number
+    int         dbuf);  // double buffer index
 
 // apply all keyframes found in the module list and write to the modules parameters according to
 // the current frame in the graph (g->frame). floating point parameters will be interpolated.
-void
-dt_graph_apply_keyframes(
+void dt_graph_apply_keyframes(
     dt_graph_t *g);
 
 static inline dt_token_t

@@ -1,5 +1,6 @@
 #include "modules/api.h"
 #include "core/core.h"
+#include "core/fs.h"
 #define STB_DXT_IMPLEMENTATION
 #include "stb_dxt.h"
 
@@ -12,15 +13,17 @@
 // called after pipeline finished up to here.
 // our input buffer will come in memory mapped.
 void write_sink(
-    dt_module_t *module,
-    void *buf)
+    dt_module_t            *module,
+    void                   *buf,
+    dt_write_sink_params_t *p)
 {
   const char *filename = dt_module_param_string(module, 0);
-  // fprintf(stderr, "[o-bc1] writing '%s'\n", filename);
 
   const uint32_t wd = module->connector[0].roi.wd;
   const uint32_t ht = module->connector[0].roi.ht;
   const uint8_t *in = (const uint8_t *)buf;
+
+  // fprintf(stderr, "[o-bc1] graph %lx writing '%s' %d x %d\n", module->graph, filename, wd, ht);
 
   // go through all 4x4 blocks
   // parallelise via our thread pool or openmp or what?
@@ -56,6 +59,6 @@ void write_sink(
   free(out);
   // atomically create filename only when we're quite done writing:
   unlink(filename); // just to be sure the link will work
-  link(tmpfile, filename);
+  fs_link(tmpfile, filename);
   unlink(tmpfile);
 }

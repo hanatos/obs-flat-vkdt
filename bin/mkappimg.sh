@@ -22,7 +22,8 @@ cp vkdt.png AppDir/usr/share/icons/
 cat > AppDir/AppRun << 'EOF'
 #!/bin/bash
 HERE=$(dirname $(realpath ${0}))
-export LD_LIBRARY_PATH=${HERE}/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
+# export LD_LIBRARY_PATH=${HERE}/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
+export LD_LIBRARY_PATH=${HERE}/usr/lib:${LD_LIBRARY_PATH}
 ${HERE}/usr/bin/vkdt $@
 EOF
 chmod +x AppDir/AppRun
@@ -34,6 +35,6 @@ chmod +x linuxdeploy-x86_64.AppImage
 export VERSION=$(git describe)
 export ARCH=x86_64
 export DISABLE_COPYRIGHT_FILES_DEPLOYMENT=1
-./linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage $(find AppDir/ -name "lib*.so" | sed -e 's/^/ -l /' | tr -d '\n') \
+./linuxdeploy-x86_64.AppImage --appdir AppDir -i vkdt.png --output appimage $(find AppDir/ -name "lib*.so" | sed -e 's/^/ -l /' | tr -d '\n') \
 -e AppDir/usr/bin/vkdt
 rm -rf AppDir

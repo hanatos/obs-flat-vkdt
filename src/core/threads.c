@@ -11,8 +11,8 @@
 #include <sched.h>
 #include <time.h>
 #include <pthread.h>
-#if 0//def _WIN64
-  #include <Windows.h> 
+#ifdef _WIN64
+#include <Windows.h> 
 #endif
 
 threads_t thr;
@@ -47,8 +47,8 @@ threads_task_t;
 
 typedef struct threads_t
 {
-  uint32_t num_threads;
-  int      shutdown;
+  uint32_t        num_threads;
+  atomic_int      shutdown;
 
   // worker list
   pthread_t      *worker;
@@ -60,6 +60,7 @@ typedef struct threads_t
   pthread_cond_t  cond_task_push;
   pthread_mutex_t mutex_done;
   pthread_mutex_t mutex_push;
+  pthread_t       main_thread;
 }
 threads_t;
 
@@ -109,7 +110,7 @@ void *threads_work(void *arg)
       // and avoid the done pointer.
       while(!thr.shutdown && (thr.task[task->reftask].done < task->work_item_cnt)) sched_yield();
       if(thr.shutdown) break; // don't clean up, we didn't wait for everybody!
-      task->free(task->data); // every thread gets the callback, they coordinate who cleans task->data
+      task->free(task->data);
     }
     // signal everybody that we're done with the task
     pthread_mutex_lock(&thr.mutex_done);
@@ -232,10 +233,9 @@ void threads_wait(int taskid)
 void threads_global_init()
 {
 #ifdef _WIN64
-  // SYSTEM_INFO si;
-  // GetSystemInfo(&si);
-  // thr.num_threads = si.dwNumberOfProcessors;
-  thr.num_threads = 4;
+  SYSTEM_INFO si;
+  GetSystemInfo(&si);
+  thr.num_threads = si.dwNumberOfProcessors;
 #else
   thr.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
 #endif
@@ -244,6 +244,8 @@ void threads_global_init()
   thr.task     = malloc(sizeof(threads_task_t)*thr.task_max);
   thr.cpuid    = malloc(sizeof(uint32_t)*thr.num_threads);
   thr.worker   = malloc(sizeof(pthread_t)*thr.num_threads);
+
+  thr.main_thread = pthread_self();
 
   for(int k=0;k<thr.task_max;k++)
     thr.task[k].tid = s_task_state_recycle;
@@ -329,4 +331,9 @@ float threads_task_progress(int taskid)
 {
   if(taskid < 0 || taskid >= thr.task_max) return 0.0f;
   return thr.task[taskid].done / (float) thr.task[taskid].work_item_cnt;
+}
+
+int threads_i_am_gui()
+{
+  return pthread_self() == thr.main_thread;
 }

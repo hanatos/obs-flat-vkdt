@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <errno.h>
+#include <inttypes.h>
 
 #if 0
 void
@@ -48,13 +49,11 @@ dt_thumbnails_init(
 {
   memset(tn, 0, sizeof(*tn));
 
-  // TODO: getenv(XDG_CACHE_HOME)
-  const char *home = getenv("HOME");
-  snprintf(tn->cachedir, sizeof(tn->cachedir), "%s/.cache/vkdt", home);
-  int err = fs_mkdir(tn->cachedir, 0755);
+  fs_cachedir(tn->cachedir, sizeof(tn->cachedir));
+  int err = fs_mkdir_p(tn->cachedir, 0755);
   if(err && errno != EEXIST)
   {
-    dt_log(s_log_err|s_log_db, "could not create thumbnail cache directory!");
+    dt_log(s_log_err|s_log_db, "could not create thumbnail cache directory %s!", tn->cachedir);
     return VK_INCOMPLETE;
   }
 
@@ -62,14 +61,8 @@ dt_thumbnails_init(
   tn->thumb_ht = ht,
   tn->thumb_max = cnt;
 
-  dt_graph_init(tn->graph + 0);
-  dt_graph_init(tn->graph + 1);
-  tn->graph[0].queue       =  qvk.queue_work0;
-  tn->graph[0].queue_idx   =  qvk.queue_idx_work0;
-  tn->graph[0].queue_mutex = &qvk.queue_work0_mutex;
-  tn->graph[1].queue       =  qvk.queue_work1;
-  tn->graph[1].queue_idx   =  qvk.queue_idx_work1;
-  tn->graph[1].queue_mutex = &qvk.queue_work1_mutex;
+  dt_graph_init(tn->graph + 0, s_queue_work0);
+  dt_graph_init(tn->graph + 1, s_queue_work1);
 
   threads_mutex_init(tn->graph_lock + 0, 0);
   threads_mutex_init(tn->graph_lock + 1, 0);
@@ -143,6 +136,7 @@ dt_thumbnails_init(
   }};
 
   VkDescriptorPoolCreateInfo pool_info = {
+    .flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT,
     .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
     .poolSizeCount = LENGTH(pool_sizes),
     .pPoolSizes    = pool_sizes,
@@ -158,6 +152,7 @@ dt_thumbnails_init(
     .pImmutableSamplers = 0,
   };
   VkDescriptorSetLayoutCreateInfo dset_layout_info = {
+    .flags        = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT,
     .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
     .bindingCount = 1,
     .pBindings    = &binding,
@@ -189,6 +184,8 @@ dt_thumbnails_cleanup(
   {
     if(tn->thumb[i].image)      vkDestroyImage    (qvk.device, tn->thumb[i].image,      0);
     if(tn->thumb[i].image_view) vkDestroyImageView(qvk.device, tn->thumb[i].image_view, 0);
+    tn->thumb[i].image      = 0;
+    tn->thumb[i].image_view = 0;
   }
   free(tn->thumb);
   tn->thumb = 0;
@@ -205,7 +202,7 @@ dt_thumbnails_invalidate(
 {
   uint64_t hash = hash64(filename);
   char bc1filename[1040];
-  snprintf(bc1filename, sizeof(bc1filename), "%s/%lx.bc1", tn->cachedir, hash);
+  snprintf(bc1filename, sizeof(bc1filename), "%s/%"PRIx64".bc1", tn->cachedir, hash);
   unlink(bc1filename);
 }
 
@@ -230,38 +227,49 @@ dt_thumbnails_cache_one(
   char deffilename[PATH_MAX+100];
   char bc1filename[PATH_MAX+100];
   uint64_t hash = hash64(filename);
-  snprintf(bc1filename, sizeof(bc1filename), "%s/%lx.bc1", tn->cachedir, hash);
+  snprintf(bc1filename, sizeof(bc1filename), "%s/%"PRIx64".bc1", tn->cachedir, hash);
   snprintf(cfgfilename, sizeof(cfgfilename), "%s", filename);
   snprintf(deffilename, sizeof(deffilename), "default.%"PRItkn, dt_token_str(input_module));
   struct stat statbuf = {0};
   time_t tcfg = 0, tbc1 = 0;
 
   if(!stat(cfgfilename, &statbuf))
+#ifdef __APPLE__
+    tcfg = statbuf.st_mtimespec.tv_sec;
+#else
     tcfg = statbuf.st_mtime;
+#endif
   else
   {
     char tmp[PATH_MAX];
     if(snprintf(tmp, sizeof(tmp), "%s/%s", dt_pipe.basedir, deffilename) >= PATH_MAX)
       return VK_INCOMPLETE;
     if(!stat(tmp, &statbuf))
+#ifdef __APPLE__
+      tcfg = statbuf.st_mtimespec.tv_sec;
+#else
       tcfg = statbuf.st_mtime;
+#endif
     else return VK_INCOMPLETE;
   }
 
   if(!stat(bc1filename, &statbuf))
   { // check timestamp
+#ifdef __APPLE__
+    tbc1 = statbuf.st_mtimespec.tv_sec;
+#else
     tbc1 = statbuf.st_mtime;
+#endif
     if(tcfg && (tbc1 >= tcfg)) return VK_SUCCESS; // already up to date
   }
 
   dt_graph_reset(graph);
 
   char *extrap[] = {
-    "param:f2srgb:main:usemat:0", // write thumbnails as rec2020 with gamma
     "frames:1",                   // only render first frame of animation
   };
   dt_graph_export_t param = {
-    .extra_param_cnt = 2,
+    .extra_param_cnt = 1,
     .p_extra_param   = extrap,
     .p_cfgfile       = cfgfilename,
     .p_defcfg        = deffilename,
@@ -273,6 +281,8 @@ dt_thumbnails_cache_one(
       .mod        = dt_token("o-bc1"),
       .inst       = dt_token("main"),
       .p_filename = bc1filename,
+      .colour_primaries = s_colour_primaries_2020, // thumbnails are immediately in working space
+      .colour_trc       = s_colour_trc_srgb,       // but have srgb gamma to better fit into 8 bit files
     }},
   };
 
@@ -282,7 +292,7 @@ dt_thumbnails_cache_one(
     dt_log(s_log_db, "[thm] running the thumbnail graph failed on image '%s'!", filename);
     // mark as dead
     snprintf(cfgfilename, sizeof(cfgfilename), "%s/data/bomb.bc1", dt_pipe.basedir);
-    link(cfgfilename, bc1filename);
+    fs_link(cfgfilename, bc1filename);
     return 4;
   }
   clock_t end = clock();
@@ -308,13 +318,13 @@ static void thread_free_coll(void *arg)
 {
   // task is done, every thread will call this
   cache_coll_job_t *j = arg;
-  // only first thread frees 
+  // only first thread destroys shared things
   if(j->gid == 0)
   {
     pthread_mutex_destroy(&j->mutex_storage);
     free(j->coll);
-    free(j);
   }
+  free(j);
 }
 
 void
@@ -342,7 +352,9 @@ thread_work_coll(
   dt_db_image_path(j->db, j->coll[item], filename, sizeof(filename));
   (void) dt_thumbnails_cache_one(j->tn->graph + j->gid, j->tn, filename);
   // invalidate what we have in memory to trigger a reload:
+  threads_mutex_lock(&j->db->image_mutex);
   j->db->image[j->coll[item]].thumbnail = 0;
+  threads_mutex_unlock(&j->db->image_mutex);
   j->tn->graph[j->gid].io_mutex = 0;
   if(j->ufn) j->ufn();
 abort:
@@ -358,20 +370,18 @@ dt_thumbnails_cache_list(
     void           (*updatefn)(void))
 {
   if(imgid_cnt <= 0)
-  {
-    dt_log(s_log_err, "[thm] no images in list!");
     return VK_INCOMPLETE;
-  }
 
   uint32_t *collection = malloc(sizeof(uint32_t) * imgid_cnt);
   memcpy(collection, imgid, sizeof(uint32_t) * imgid_cnt); // take copy because this thing changes
-  cache_coll_job_t *job = malloc(sizeof(cache_coll_job_t)*DT_THUMBNAILS_THREADS);
+  cache_coll_job_t *job0 = 0;
   int taskid = -1;
   for(int k=0;k<DT_THUMBNAILS_THREADS;k++)
   {
+    cache_coll_job_t *job = malloc(sizeof(cache_coll_job_t));
     if(k == 0)
     {
-      job[0] = (cache_coll_job_t) {
+      *job = (cache_coll_job_t) {
         .stamp = tn->job_timestamp,
         .coll  = collection,
         .gid   = k,
@@ -379,12 +389,13 @@ dt_thumbnails_cache_list(
         .db    = db,
         .ufn   = updatefn,
       };
-      threads_mutex_init(&job[0].mutex_storage, 0);
-      job[0].mutex = &job[0].mutex_storage;
+      threads_mutex_init(&job->mutex_storage, 0);
+      job->mutex = &job->mutex_storage;
+      job0 = job;
     }
-    else job[k] = (cache_coll_job_t) {
+    else *job = (cache_coll_job_t) {
       .stamp = tn->job_timestamp,
-      .mutex = &job[0].mutex_storage,
+      .mutex = &job0->mutex_storage,
       .coll  = collection,
       .gid   = k,
       .tn    = tn,
@@ -397,7 +408,7 @@ dt_thumbnails_cache_list(
         "thumb",
         imgid_cnt,
         taskid,
-        job+k,
+        job,
         thread_work_coll,
         thread_free_coll);
     if(taskid < 0) return VK_INCOMPLETE;
@@ -435,18 +446,23 @@ dt_thumbnails_load_list(
     const uint32_t imgid = collection[k];
     if(imgid >= db->image_cnt) break; // safety first. this probably means this job is stale! big danger!
     dt_image_t *img = db->image + imgid;
-    if(img->thumbnail == 0)
+    uint32_t tid = img->thumbnail;
+    if(tid == 0)
     { // not loaded
       char filename[1024];
       dt_db_image_path(db, imgid, filename, sizeof(filename));  
-      img->thumbnail = -1u;
-      if(dt_thumbnails_load_one(tn, filename, &img->thumbnail))
-        img->thumbnail = 0;
+      uint32_t thumb_index = -1u;
+      if(dt_thumbnails_load_one(tn, filename, &thumb_index) == VK_SUCCESS)
+      {
+        threads_mutex_lock(&db->image_mutex);
+        img->thumbnail = thumb_index;
+        threads_mutex_unlock(&db->image_mutex);
+      }
     }
-    else if(img->thumbnail > 0 && img->thumbnail < tn->thumb_max)
+    else if(tid > 0 && tid < tn->thumb_max)
     { // loaded, update lru
       // threads_mutex_lock(&tn->lru_lock);
-      dt_thumbnail_t *th = tn->thumb + img->thumbnail;
+      dt_thumbnail_t *th = tn->thumb + tid;
       if(th == tn->lru) tn->lru = tn->lru->next; // move head
       tn->lru->prev = 0;
       if(tn->mru == th) tn->mru = th->prev;      // going to remove mru, need to move
@@ -466,20 +482,25 @@ dt_thumbnails_load_one(
     uint32_t        *thumb_index)
 {
   dt_graph_t *graph = tn->graph;
-  char imgfilename[PATH_MAX+100] = {0};
+  char imgfilename[PATH_MAX] = {0};
   if(strncmp(filename, "data/", 5))
   { // only hash images that aren't straight from our resource directory:
-    // TODO: make sure ./dir/file and dir//file etc turn out to be the same
+    // XXX run through realpath once for windows and / vs \\ confusion?
     uint64_t hash = hash64(filename);
-    snprintf(imgfilename, sizeof(imgfilename), "%s/%lx.bc1", tn->cachedir, hash);
+    snprintf(imgfilename, sizeof(imgfilename), "%s/%"PRIx64".bc1", tn->cachedir, hash);
   }
-  else snprintf(imgfilename, sizeof(imgfilename), "%s/%s", dt_pipe.basedir, filename);
+  else if(snprintf(imgfilename, sizeof(imgfilename), "%s/%s", dt_pipe.basedir, filename) >= sizeof(imgfilename)) return VK_INCOMPLETE;
   struct stat statbuf = {0};
   if(stat(imgfilename, &statbuf)) return VK_INCOMPLETE;
 
   dt_graph_reset(graph);
-  int m0 = dt_module_add(graph, dt_token("i-bc1"), dt_token("01"));
+  int m0 = dt_module_add(graph, dt_token("i-bc1"), dt_token("main"));
   int m1 = dt_module_add(graph, dt_token("thumb"), dt_token("main"));
+  if(m0 < 0 || m1 < 0)
+  { // catching a crash here, but this is worrying
+    dt_log(s_log_err, "[thm] failed to add modules to the graph!");
+    return VK_INCOMPLETE;
+  }
   dt_module_connect(graph, m0, 0, m1, 0);
 
   dt_thumbnail_t *th = 0;
@@ -607,9 +628,6 @@ dt_thumbnails_load_one(
   // now run the rest of the graph and copy over VkImage
   // let graph render into our thumbnail:
   graph->thumbnail_image = tn->thumb[*thumb_index].image;
-  // these should already match, let's not mess with rounding errors:
-  // tn->graph.output_wd = th->wd;
-  // tn->graph.output_ht = th->ht;
 
   clock_t beg = clock();
   // run all the rest we didn't run above

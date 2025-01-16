@@ -1,4 +1,5 @@
 #pragma once
+#include "pipe/token.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -28,7 +29,9 @@ typedef struct dt_log_t
 }
 dt_log_t;
 
-extern dt_log_t dt_log_global;
+#ifndef VKDT_DSO_BUILD
+extern VKDT_API dt_log_t dt_log_global;
+#endif
 
 // this can be done to parse "-d level" from
 // the command line to add more verbose output
@@ -116,7 +119,7 @@ dt_log(
     "[snd]",
     "[perf]",
     "[mem]",
-    "\e[31m[ERR]\e[0m",
+    "\033[31m[ERR]\033[0m",
   };
 
   if(dt_log_global.mask & mask)

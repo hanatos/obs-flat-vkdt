@@ -73,7 +73,7 @@ create_nodes(
   const int id_collect = graph->num_nodes++;
   graph->node[id_collect] = (dt_node_t) {
     .name   = dt_token("pick"),
-    .kernel = graph->float_atomics_supported ? dt_token("collect") : dt_token("coldumb"),
+    .kernel = qvk.float_atomics_supported ? dt_token("collect") : dt_token("coldumb"),
     .module = module,
     .wd     = module->connector[0].roi.wd,
     .ht     = module->connector[0].roi.ht,
@@ -236,8 +236,9 @@ _cie_de76(
 // called after pipeline finished up to here.
 // our input buffer will come in memory mapped.
 void write_sink(
-    dt_module_t *module,
-    void *buf)
+    dt_module_t            *module,
+    void                   *buf,
+    dt_write_sink_params_t *p)
 {
   float *f32 = buf;
   const int wd = module->connector[3].roi.wd;
@@ -273,9 +274,9 @@ void write_sink(
     if(show == 2)
     {
       const float d = _cie_de76(picked+3*k, ref+3*k);
-      picked[3*k+0] -= ref[3*k+0];
-      picked[3*k+1] -= ref[3*k+1];
-      picked[3*k+2] -= ref[3*k+2];
+      picked[3*k+0] = fabsf(picked[3*k+0] - ref[3*k+0]);
+      picked[3*k+1] = fabsf(picked[3*k+1] - ref[3*k+1]);
+      picked[3*k+2] = fabsf(picked[3*k+2] - ref[3*k+2]);
       if(d < de76[1])
       {
         // mi = k;

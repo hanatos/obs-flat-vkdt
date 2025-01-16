@@ -9,6 +9,7 @@
 typedef struct lutinput_buf_t
 {
   char filename[PATH_MAX];
+  char errormsg[256];
   dt_lut_header_t header;
   size_t data_begin;
   FILE *f;
@@ -22,9 +23,10 @@ read_header(
 {
   lutinput_buf_t *lut = mod->data;
 
-  char filename[PATH_MAX];
-  const char *key[] = { "maker", "model", 0};
-  const char *val[] = { mod->graph->main_img_param.maker, mod->graph->main_img_param.model, 0};
+  char filename[PATH_MAX], flen[10];
+  snprintf(flen, sizeof(flen), "%g", mod->graph->main_img_param.focal_length);
+  const char *key[] = { "maker", "model", "flen", 0};
+  const char *val[] = { mod->graph->main_img_param.maker, mod->graph->main_img_param.model, flen, 0};
   dt_strexpand(pattern, strlen(pattern), filename, sizeof(filename), key, val);
   // fprintf(stderr, "[i-lut] %"PRItkn" loading `%s'!\n", dt_token_str(mod->inst), filename);
 
@@ -55,6 +57,9 @@ read_header(
   return 0;
 error:
   fprintf(stderr, "[i-lut] %"PRItkn" could not load file `%s'!\n", dt_token_str(mod->inst), filename);
+  if(snprintf(lut->errormsg, sizeof(lut->errormsg), "i-lut: %"PRItkn" could not load file `%s'!", dt_token_str(mod->inst), filename) >= sizeof(lut->errormsg))
+    fprintf(stderr, "\n"); // fuck you gcc
+  mod->graph->gui_msg = lut->errormsg;
   lut->filename[0] = 0;
   return 1;
 }
@@ -62,11 +67,13 @@ error:
 static int
 read_plain(
     lutinput_buf_t *lut,
-    uint16_t       *out)
+    void           *out)
 {
   if(!lut->f) return 1;
   fseek(lut->f, lut->data_begin, SEEK_SET);
-  size_t sz = lut->header.datatype == dt_lut_header_f16 ? sizeof(uint16_t) : sizeof(float);
+  int datatype = lut->header.datatype;
+  if(datatype >= dt_lut_header_ssbo_f16) datatype -= dt_lut_header_ssbo_f16;
+  size_t sz = datatype == dt_lut_header_f16 ? sizeof(uint16_t) : sizeof(float);
   fread(out, lut->header.wd*(uint64_t)lut->header.ht*(uint64_t)lut->header.channels, sz, lut->f);
   return 0;
 }
@@ -108,13 +115,17 @@ void modify_roi_out(
   }
   lutinput_buf_t *lut = mod->data;
   // adjust output connector channels:
-  if(lut->header.channels == 1)
-    if(mod->connector[0].chan != dt_token("ssbo"))
-        mod->connector[0].chan = dt_token("r");
+  if(lut->header.channels == 1) mod->connector[0].chan   = dt_token("r");
   if(lut->header.channels == 2) mod->connector[0].chan   = dt_token("rg");
   if(lut->header.channels == 4) mod->connector[0].chan   = dt_token("rgba");
-  if(lut->header.datatype == 0) mod->connector[0].format = dt_token("f16");
-  if(lut->header.datatype == 1) mod->connector[0].format = dt_token("f32");
+  int dtype = lut->header.datatype;
+  if(dtype >= dt_lut_header_ssbo_f16)
+  {
+    mod->connector[0].chan = dt_token("ssbo");
+    dtype -= dt_lut_header_ssbo_f16;
+  }
+  if(dtype == 0) mod->connector[0].format = dt_token("f16");
+  if(dtype == 1) mod->connector[0].format = dt_token("f32");
   mod->connector[0].roi.full_wd = lut->header.wd;
   mod->connector[0].roi.full_ht = lut->header.ht;
 }

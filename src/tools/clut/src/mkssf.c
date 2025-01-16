@@ -16,13 +16,14 @@
 // - cfa model: plain gauss sigmoid pca
 // - optimiser: gauss/newton adam nelder/mead
 // - parameter: number of iterations
-static int num_it        = 300;
-static int num_epochs    = 15;
+static int num_it        = 80;
+static int num_epochs    = 6;
 static int cfa_model     = 2;          // default to gauss
-static int cfa_num_coeff = 20;
+static int cfa_num_coeff = 30;
 static double cfa_param[3*36] = {0.1}; // init to something. zero has zero derivatives and is thus bad.
 
 static double ill[2][CIE2_SAMPLES];    // tabulated illuminants for the two target shots
+static int ill_cnt = 2;
 
 // reference data.
 // a) via two cc24 photographs, incandescent + daylight:
@@ -249,6 +250,7 @@ void loss(
   // integrate test spectra against tentative cfa and illumination spectrum:
   for(int ill=1;ill<=2;ill++)
   {
+    if(ill_cnt == 1 && ill == 1) continue; // use only D65
     integrate_cfa(res, p, ill==1?cie_a:cie_d65);
     // compare res to reference values (mean squared error):
     for(int i=0;i<24;i++)
@@ -280,6 +282,7 @@ void loss_pictures(
   // integrate test spectra against tentative cfa and illumination spectrum:
   for(int ill=1;ill<=2;ill++)
   {
+    if(ill_cnt == 1 && ill == 1) continue; // use only D65
     double (*refi)[3] = ill==1 ? ref_picked_a : ref_picked_d65;
     integrate_cfa(res, p, ill==1?cie_a:cie_d65);
     // compare res to reference values (mean squared error):
@@ -308,6 +311,7 @@ void loss_upsample(
   // integrate test spectra against tentative cfa and illumination spectrum:
   for(int ill=1;ill<=2;ill++)
   {
+    if(ill_cnt == 1 && ill == 1) continue; // use only D65
     integrate_cfa_upsample(res, p, ill==1?cie_a:cie_d65);
     // compare res to reference values (mean squared error):
     for(int i=0;i<upsample_cnt;i++)
@@ -421,6 +425,7 @@ int main(int argc, char *argv[])
     else if(!strcmp(argv[k], "--num-epochs") && k+1 < argc) num_epochs = atol(argv[++k]);
     else if(!strcmp(argv[k], "--cfa-model" ) && k+1 < argc) cfa_model = cfa_model_parse(argv[++k]);
     else if(!strcmp(argv[k], "--num-coeff" ) && k+1 < argc) cfa_num_coeff = CLAMP(atol(argv[++k]), 1, 36);
+    else if(!strcmp(argv[k], "--single-ill")) ill_cnt = 1;
     else if(!strcmp(argv[k], "--opt") && k+1 < argc) optimiser = parse_optimiser(argv[++k]);
     else if(argv[k][0] != '-') model = argv[k];
     else fprintf(stderr, "[mkssf] unknown argument %s\n", argv[k]);
@@ -438,6 +443,7 @@ int main(int argc, char *argv[])
     fprintf(stderr, "usage: mkssf <dng file>      lookup dng profile from this file\n"
                     "          --ill0 <temp>      use blackbody with this temperature instead of D65\n"
                     "          --ill1 <temp>      use blackbody with this temperature instead of A\n"
+                    "          --single-ill       use only illuminant D65\n"
                     "          --picked <a> <d65> load '<a>.txt' and '<d65>.txt' with cc24 values\n"
                     "                             to be used instead of the dng profile.\n"
                     "          --num-it <i>       use this number of iterations per epoch.\n"
@@ -455,9 +461,6 @@ int main(int argc, char *argv[])
   { // load dng profiles (matrices etc) from exif tags
     dng_profile_fill(&profile_a,   model, 1);
     dng_profile_fill(&profile_d65, model, 2);
-    // kill the HueSatMap because it assumes normalised input which we don't provide during optimisation
-    free(profile_a.hsm);   profile_a.hsm   = 0;
-    free(profile_d65.hsm); profile_d65.hsm = 0;
   }
 
 #if 0

@@ -24,10 +24,13 @@ ifneq ($(VKDT_USE_MLV), 1)
   MODULES:=$(filter-out i-mlv,$(MODULES))
 endif
 ifneq ($(VKDT_USE_FFMPEG), 1)
-  MODULES:=$(filter-out i-vid,$(MODULES))
+  MODULES:=$(filter-out i-vid o-vid,$(MODULES))
 endif
 ifneq ($(VKDT_USE_QUAKE), 1)
   MODULES:=$(filter-out quake,$(MODULES))
+endif
+ifneq ($(VKDT_USE_MCRAW), 1)
+  MODULESXX:=$(filter-out i-mcraw,$(MODULESXX))
 endif
 
 # generate list of dso filenames, i.e. modules/*/lib*.so according to MODULES
@@ -57,6 +60,8 @@ include tools/flat.mk
 clean: Makefile
 	rm -f ../bin/vkdt ../bin/vkdt-cli ../bin/vkdt-fit
 	rm -f $(GUI_O) $(CORE_O) $(PIPE_O) $(SND_O) $(CLI_O) $(FIT_O) $(QVK_O) $(DB_O)
+	rm -f gui/shd.h
+	rm -f gui/shd/*.spv
 	# we delete *all* modules, not just the one in MOD_DSOS* because they may be from another branch.
 	# such stale libraries can still cause segfaults because they would be loaded.
 	# at some point we probably need to harden the api such that this still works. maybe.
@@ -65,11 +70,11 @@ clean: Makefile
 	rm -f pipe/modules/*/{ctooltips,ptooltips}
 
 # GNU_SOURCE for sched_affinity
-CFLAGS=-Wall -pipe -I. -D_GNU_SOURCE -std=c11 -DVK_ENABLE_BETA_EXTENSIONS
-CXXFLAGS=-Wall -pipe -I. -D_GNU_SOURCE
+CFLAGS?=-Wall -pipe -I. -D_GNU_SOURCE -std=c11
+CXXFLAGS?=-Wall -pipe -I. -D_GNU_SOURCE -std=c++17
 EXE_CFLAGS?=-fPIC
-LDFLAGS=
-VK_CFLAGS:=$(shell pkg-config --cflags vulkan)
+# LDFLAGS=
+VK_CFLAGS:=$(VKDT_VULKAN_CFLAGS)
 
 qvk/%.o: qvk/%.c Makefile $(QVK_H) qvk/flat.mk
 	$(CC) $(CFLAGS) $(EXE_CFLAGS) $(OPT_CFLAGS) $(VK_CFLAGS) $(QVK_CFLAGS) -c $< -o $@
@@ -95,15 +100,6 @@ fit/%.o: fit/%.c Makefile $(FIT_H) fit/flat.mk
 gui/%.o: gui/%.c Makefile $(GUI_H) gui/flat.mk
 	$(CC) $(CFLAGS) $(EXE_CFLAGS) $(OPT_CFLAGS) $(VK_CFLAGS) $(GUI_CFLAGS) -c $< -o $@
 
-gui/%.o: gui/%.cc Makefile $(GUI_H) gui/flat.mk
-	$(CXX) $(CXXFLAGS) $(EXE_CFLAGS) $(OPT_CFLAGS) $(VK_CFLAGS) $(GUI_CFLAGS) -c $< -o $@
-
-../ext/imgui/%.o: ../ext/imgui/%.cpp Makefile
-	$(CXX) $(CXXFLAGS) $(EXE_CFLAGS) $(OPT_CFLAGS) $(GUI_CFLAGS) -c $< -o $@
-
-ext/imgui/examples/%.o: ext/imgui/examples/%.cpp Makefile
-	$(CXX) $(CXXFLAGS) $(EXE_CFLAGS) $(OPT_CFLAGS) $(GUI_CFLAGS) -c $< -o $@
-
 # main application
 # ======================
 ../bin/vkdt: $(GUI_O) $(QVK_O) $(CORE_O) $(SND_O) $(PIPE_O) $(DB_O) Makefile
@@ -125,7 +121,8 @@ ext/imgui/examples/%.o: ext/imgui/examples/%.cpp Makefile
 # library
 # ======================
 ../bin/libvkdt.so: $(QVK_O) $(CORE_O) $(PIPE_O) $(DB_O) Makefile
-	$(CC) -shared -nostartfiles -Wl,-soname,libvkdt.so -o $@ $(QVK_O) $(CORE_O) $(PIPE_O) $(DB_O)
+	$(CC) -shared -nostartfiles -Wl,-soname,libvkdt.so -o $@ $(QVK_O) $(CORE_O) $(PIPE_O) $(DB_O) \
+    $(LDFLAGS) $(QVK_LDFLAGS) $(PIPE_LDFLAGS) $(CORE_LDFLAGS) $(DB_LDFLAGS) $(OPT_LDFLAGS)
 
 # modules
 # ======================
@@ -140,7 +137,8 @@ MOD_GLOBAL_DEPS=\
   pipe/connector.h\
   pipe/connector.c\
   pipe/connector.inc
-MOD_GLOBAL_CFLAGS=-Ipipe -I. -fPIC
+MOD_GLOBAL_CFLAGS=-Ipipe -I. -fPIC -DVKDT_DSO_BUILD
+MOD_GLOBAL_LDFLAGS=-ldl
 
 # expand all cflags/ldflags/deps/extra-c from flat.mk:
 $(foreach MOD,$(FLATMK),\
@@ -156,13 +154,13 @@ $(foreach MOD,$(FLATMK),\
 
 define MOD_RULE
 pipe/modules/$1/lib$1.so: pipe/modules/$1/main.c pipe/modules/$1/flat.mk $(MOD_$(1)_DEPS) $(MOD_GLOBAL_DEPS)
-	$(CC) $(CFLAGS) $(MOD_GLOBAL_CFLAGS) $(OPT_CFLAGS) $(VK_CFLAGS) $(MOD_$(1)_CFLAGS) -shared $$< $(MOD_$(1)_C) -o $$@ $(LDFLAGS) $(OPT_LDFLAGS) $(MOD_$(1)_LDFLAGS)
+	$(CC) $(CFLAGS) $(MOD_GLOBAL_CFLAGS) $(OPT_CFLAGS) $(VK_CFLAGS) $(MOD_$(1)_CFLAGS) -shared $$< $(MOD_$(1)_C) -o $$@ $(LDFLAGS) $(OPT_LDFLAGS) $(MOD_$(1)_LDFLAGS) $(MOD_GLOBAL_LDFLAGS)
 endef
 $(foreach mod,$(MODULES),$(eval $(call MOD_RULE,$(mod))))
 
 define MOD_RULEXX
 pipe/modules/$1/lib$1.so:pipe/modules/$1/main.cc pipe/modules/$1/flat.mk $(MOD_$(1)_DEPS) $(MOD_GLOBAL_DEPS)
-	$(CXX) $(CXXFLAGS) $(MOD_GLOBAL_CFLAGS) $(OPT_CFLAGS) $(VK_CFLAGS) $(MOD_$(1)_CFLAGS) -shared $$< $(MOD_$(1)_C) -o $$@ $(LDFLAGS) $(OPT_LDFLAGS) $(MOD_$(1)_LDFLAGS)
+	$(CXX) $(CXXFLAGS) $(MOD_GLOBAL_CFLAGS) $(OPT_CFLAGS) $(VK_CFLAGS) $(MOD_$(1)_CFLAGS) -shared $$< $(MOD_$(1)_C) -o $$@ $(LDFLAGS) $(OPT_LDFLAGS) $(MOD_$(1)_LDFLAGS) $(MOD_GLOBAL_LDFLAGS)
 endef
 $(foreach mod,$(MODULESXX),$(eval $(call MOD_RULEXX,$(mod))))
 

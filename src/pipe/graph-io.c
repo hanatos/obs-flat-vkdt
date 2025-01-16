@@ -1,7 +1,7 @@
 #include "pipe/graph-io.h"
 #include "pipe/graph-history.h"
 #include "modules/api.h"
-#include "pipe/io.h"
+#include "pipe/asciiio.h"
 #include "core/log.h"
 #include "core/fs.h"
 #include <libgen.h>
@@ -164,7 +164,7 @@ read_connection_ascii(
 
   int modid0 = dt_module_get(graph, mod0, inst0);
   int modid1 = dt_module_get(graph, mod1, inst1);
-  if(modid0 <= -1 || modid1 <= -1 || modid0 >= graph->num_modules || modid1 >= graph->num_modules)
+  if((mod0 != dt_token("-1") && modid0 <= -1) || modid1 <= -1 || modid0 >= graph->num_modules || modid1 >= graph->num_modules)
   {
     dt_log(s_log_pipe, "[read connect] "
         "%"PRItkn" %"PRItkn" %"PRItkn" %"PRItkn" %"PRItkn" %"PRItkn"",
@@ -173,8 +173,10 @@ read_connection_ascii(
     dt_log(s_log_pipe, "[read connect] no such modules %d %d", modid0, modid1);
     return 1;
   }
-  int conid0 = dt_module_get_connector(graph->module+modid0, conn0);
-  int conid1 = dt_module_get_connector(graph->module+modid1, conn1);
+  int conid0 = -1;
+  if(mod0 == dt_token("-1")) modid0 = -1;
+  else conid0 = dt_module_get_connector(graph->module+modid0, conn0);
+  int  conid1 = dt_module_get_connector(graph->module+modid1, conn1);
   int err = extra_flags & s_conn_feedback ?
     dt_module_feedback(graph, modid0, conid0, modid1, conid1) :
     dt_module_connect (graph, modid0, conid0, modid1, conid1);
@@ -248,11 +250,9 @@ int dt_graph_set_searchpath(
     const char *filename)
 {
   snprintf(graph->basedir, sizeof(graph->basedir), "%s", dt_pipe.basedir); // take copy for modules without global access
-  char target[256] = {0};
+  char target[PATH_MAX] = {0};
   const char *f = target;
-  ssize_t err = readlink(filename, target, sizeof(target));
-  if(err == -1) // mostly not a link. might be a different error but we don't want to use target.
-    f = filename;
+  if(!fs_realpath(filename, target)) f = filename;
 
   if(snprintf(graph->searchpath, sizeof(graph->searchpath), "%s", f) < 0)
   {
@@ -301,6 +301,7 @@ int dt_graph_read_config_ascii(
     // > 0 are warnings, < 0 are fatal, 0 is success
     if(dt_graph_read_config_line(graph, line) < 0) goto error;
   }
+  for(int m=0;m<graph->num_modules;m++) dt_module_keyframe_post_update(graph->module+m);
   fclose(f);
   return 0;
 error:
@@ -339,19 +340,31 @@ dt_graph_write_connection_ascii(
     const int         m,      // module index
     const int         i,      // connector index on given module
     char             *line,
-    size_t            size)
+    size_t            size,
+    int               allow_empty)
 {
   if(graph->module[m].name == 0) return line;
   dt_connector_t *c = graph->module[m].connector+i;
   if(!dt_connector_input(c)) return line; // refuse to serialise outgoing connections
-  if(c->connected_mi == -1)  return line; // not connected
+  dt_token_t name, inst, conn;
+  if(c->connected_mi == -1)
+  { // explicitly record disconnect event (important for history)
+    if(!allow_empty) return line; // don't write disconnect events explicitly
+    name = inst = conn = dt_token("-1");
+  }
+  else
+  {
+    name = graph->module[c->connected_mi].name;
+    inst = graph->module[c->connected_mi].inst;
+    conn = graph->module[c->connected_mi].connector[c->connected_mc].name;
+  }
   WRITE("%s:"
       "%"PRItkn":%"PRItkn":%"PRItkn":"
       "%"PRItkn":%"PRItkn":%"PRItkn"\n",
       c->flags & s_conn_feedback ? "feedback" : "connect",
-      dt_token_str(graph->module[c->connected_mi].name),
-      dt_token_str(graph->module[c->connected_mi].inst),
-      dt_token_str(graph->module[c->connected_mi].connector[c->connected_mc].name),
+      dt_token_str(name),
+      dt_token_str(inst),
+      dt_token_str(conn),
       dt_token_str(graph->module[m].name),
       dt_token_str(graph->module[m].inst),
       dt_token_str(c->name));
@@ -479,7 +492,7 @@ int dt_graph_write_config_ascii(
   // write all connections
   for(int m=0;m<graph->num_modules;m++)
     for(int i=0;i<graph->module[m].num_connectors;i++)
-      if(!(buf = dt_graph_write_connection_ascii(graph, m, i, buf, end-buf)))
+      if(!(buf = dt_graph_write_connection_ascii(graph, m, i, buf, end-buf, 0)))
         goto error;
 
   // write all params
@@ -582,6 +595,7 @@ dt_graph_read_block(
     fclose(f);
     return 0;
   }
+  for(int m=0;m<graph->num_modules;m++) dt_module_keyframe_post_update(graph->module+m);
   dt_log(s_log_pipe|s_log_err, "could not open '%s'", filename);
   return 1;
 }

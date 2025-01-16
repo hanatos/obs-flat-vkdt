@@ -1,6 +1,7 @@
 #include "modules/api.h"
 #include "../core/core.h" // for MIN
 #include "../core/fs.h"
+#include "graph-history.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,7 +42,7 @@ void ui_callback(
           { // TODO set with history?
             dt_module_set_param_float(module->graph->module+m, dt_token("noise a"), a);
             dt_module_set_param_float(module->graph->module+m, dt_token("noise b"), b);
-            snprintf(msg, sizeof(msg), "setting noise parameters %g %g\n", a, b);
+            snprintf(msg, sizeof(msg), "setting noise parameters %g %g", a, b);
             module->graph->gui_msg = msg;
             module->graph->runflags = s_graph_run_all;
             break;
@@ -55,21 +56,29 @@ void ui_callback(
     size_t r = snprintf(fhome, sizeof(fhome), "%s/nprof/%s", dt_pipe.homedir, filename);
     if(r >= sizeof(fhome)) return;
     fs_dirname(fhome);
-    fs_mkdir(fhome, 0755);
+    fs_mkdir_p(fhome, 0755);
     r = snprintf(fhome, sizeof(fhome), "%s/nprof/%s", dt_pipe.homedir, filename);
     if(r >= sizeof(fhome)) return;
     fs_copy(fhome, filename);
-    r = snprintf(msg, sizeof(msg), "installing noise profile to %s\n", fhome);
+    r = snprintf(msg, sizeof(msg), "installing noise profile to %s", fhome);
     if(r >= sizeof(msg)) return;
     module->graph->gui_msg = msg;
+  }
+  else if(param == dt_token("remove"))
+  { // try and remove the noise profiling modules.
+    // this assumes module names and instances as in the shipped noise profiling preset `noise-profile.pst`
+    dt_module_remove_with_history(module->graph, dt_token("rawhist"), dt_token("np"));
+    dt_module_remove_with_history(module->graph, dt_token("nprof"), dt_token("np"));
+    dt_module_remove_with_history(module->graph, dt_token("display"), dt_token("view0"));
   }
 }
 
 // called after pipeline finished up to here.
 // our input buffer will come in memory mapped.
 void write_sink(
-    dt_module_t *module,
-    void *buf)
+    dt_module_t            *module,
+    void                   *buf,
+    dt_write_sink_params_t *p)
 {
   // read back buffer, fit line to noise, output param a and param b to file with our maker model iso:
   float *p32 = buf;

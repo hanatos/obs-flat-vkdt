@@ -1,11 +1,16 @@
 # how to manage presets
 
-in a way, presets are a simplified version of [blocks](../blocks/readme.md).
+presets are pivotal for working with graphs efficiently. setting up specific things
+such as dodging and burning with drawn masks involves adding several modules and
+orchestrating parameters across modules. presets enable you to do this in one click.
+in a way, presets are a bunch of configuration lines to be appended to the current graph.
 unlike in darktable, in vkdt presets can apply changes to the processing graph
-globally, not just to a single module. unlike blocks, presets are not a
+globally, not just to a single module. presets are not a
 template but a simple list of commands to be applied to the graph. this
 includes changing parameters, inserting new modules, and performing connections
 between modules.
+
+also see the [list of presets shipped with vkdt](../../../doc/howto/presets/presets.md).
 
 vkdt ships a few carefully orchestrated presets in the `data/presets`
 subdirectory of the installation. these have been created with [the default
@@ -25,7 +30,7 @@ that these two come directly after each other in the existing graph:
 
 of course this may fail to apply on heavily customised graphs.
 
-custom user presets can be created and are located in `~/.config/vkdt/presets`.
+custom user presets can be created and are located in `~/.config/vkdt/presets/`.
 
 ## create a custom preset
 

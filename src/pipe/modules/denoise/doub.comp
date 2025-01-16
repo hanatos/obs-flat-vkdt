@@ -10,6 +10,8 @@ layout(std140, set = 0, binding = 1) uniform params_t
 {
   float strength;
   float luma;
+  float detail;
+  int   gainmap;
 } params;
 
 layout(push_constant, std140) uniform push_t
@@ -21,23 +23,15 @@ layout(push_constant, std140) uniform push_t
   uint filters;
   float noise_a;
   float noise_b;
+  int  gainmap;
+  vec4 map_os;
 } push;
 
-layout( // input uint16 buffer rggb
-    set = 1, binding = 0
-) uniform sampler2D img_in;
-
-layout( // denoised coarse buffer
-    set = 1, binding = 1
-) uniform sampler2D img_crs0;
-
-layout( // noisy coarse buffer from input
-    set = 1, binding = 2
-) uniform sampler2D img_crs1;
-
-layout( // output f16 buffer
-    set = 1, binding = 3
-) uniform writeonly image2D img_out;
+layout(set = 1, binding = 0) uniform sampler2D img_in; // input uint16 buffer rggb
+layout(set = 1, binding = 1) uniform sampler2D img_crs0; // denoised coarse buffer
+layout(set = 1, binding = 2) uniform sampler2D img_crs1; // noisy coarse buffer from input
+layout(set = 1, binding = 3) uniform writeonly image2D img_out; // output f16 buffer
+layout(set = 1, binding = 4) uniform sampler2D img_gainmap; // optional gainmap
 
 // do one scale of decimated wavelet denoising on full res mosaic
 void
@@ -95,16 +89,32 @@ main()
   float val = texture(img_in, (ipos+push.crop.xy+.5)/vec2(textureSize(img_in, 0))).r;
 
   blendw = 0.5 * (blendw + 1.0);
-  // T = 0.0;// * upsm.w; // XXX
   if(val < white)
   {
     float wav = (val - crs1)/max(sigma, 1e-8);
     // const float ht = 2.0; // attempt to remove fireflies
     // if(abs(wav) > ht) T = 10000.0;
     float tt = min(1.0, wav/max(2.0*T,1e-8));
-    val = mix(val, max(0, mix(crs1, crs, upsm.w) + sigma * sign(wav) * mix(max(0.0, abs(wav) - T), abs(wav), tt)), blendw);
+    // protect coarse, generally insufficient:
+    // val = mix(val, max(0, mix(crs1, crs, upsm.w) + sigma * sign(wav) * mix(max(0.0, abs(wav) - T), abs(wav), tt)), blendw);
+    // protect details and coarse, better for low noise:
+    // tt *= 1.0 - upsm.w; // will affect details coefs only
+    upsm.w = pow(min(1.0, 1.0*upsm.w), 4.0); // will affect both, pull more towards protected areas (0)
+    upsm.w = 1.0 - (1.0-upsm.w)*params.detail;  // 0.0: protect full, 1.0: protect nothing
+    val = mix(val, max(0, crs + sigma * sign(wav) * mix(max(0.0, abs(wav) - T), abs(wav), tt)), upsm.w * blendw);
+    // in general super noisy stuff beyond iso 25600 or some such cannot make good use of protection (the lowest scale is pretty much just noise)
+    // TODO: introduce switch/user parameter for detail protection? something automatic based on iso?
   }
   val  = max(0, (val  - black)/(white - black));
   // val = upsm.w; // XXX DEBUG see detail shielding
+  if(push.filters != 9 && push.gainmap == 1 && params.gainmap == 1)
+  { // gainmap
+    vec2 pos = (0.5 + (ipos + push.crop.xy)/2) / (imageSize(img_out)/2);
+    pos = clamp((pos * push.map_os.zw) - push.map_os.xy, vec2(0.), vec2(1.));
+    vec4 gains = texture(img_gainmap, pos);
+    float gain = gains[(ipos.x & 1) + (ipos.y & 1) * 2];
+    val *= gain;
+    // val = gain; // XXX visualise gain map
+  } // end gainmap
   imageStore(img_out, ipos, vec4(vec3(val), 1.0));
 }

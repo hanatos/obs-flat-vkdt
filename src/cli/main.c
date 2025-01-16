@@ -10,11 +10,36 @@
 
 #include <stdlib.h>
 
+
+static inline int
+parse_prim(const char *str)
+{
+  if(!strcasecmp(str, "sRGB"))     return s_colour_primaries_srgb;
+  if(!strcasecmp(str, "bt2020"))   return s_colour_primaries_2020;
+  if(!strcasecmp(str, "adobergb")) return s_colour_primaries_adobe;
+  if(!strcasecmp(str, "P3"))       return s_colour_primaries_P3;
+  if(!strcasecmp(str, "XYZ"))      return s_colour_primaries_XYZ;
+  return s_colour_primaries_unknown;
+}
+
+static inline int
+parse_trc(const char *str)
+{
+  if(!strcasecmp(str, "linear"))   return s_colour_trc_linear;
+  if(!strcasecmp(str, "709"))      return s_colour_trc_709;
+  if(!strcasecmp(str, "sRGB"))     return s_colour_trc_srgb;
+  if(!strcasecmp(str, "PQ"))       return s_colour_trc_PQ;
+  if(!strcasecmp(str, "DCI"))      return s_colour_trc_DCI;
+  if(!strcasecmp(str, "gamma2.2")) return s_colour_trc_gamma;
+  if(!strcasecmp(str, "mclog"))    return s_colour_trc_mclog;
+  return s_colour_trc_unknown;
+}
+
 int main(int argc, char *argv[])
 {
   for(int i=0;i<argc;i++) if(!strcmp(argv[i], "--version"))
   {
-    printf("vkdt "VKDT_VERSION" (c) 2020--2023 johannes hanika\n");
+    printf("vkdt "VKDT_VERSION" (c) 2020--2024 johannes hanika\n");
     exit(0);
   }
   // init global things, log and pipeline:
@@ -45,12 +70,18 @@ int main(int argc, char *argv[])
       {i++; param.output[output_cnt].mod = dt_token(argv[i]);}
     else if(!strcmp(argv[i], "--audio") && i < argc-1)
       param.output[output_cnt].p_audio = argv[++i];
+    else if(!strcmp(argv[i], "--colour-prim") && i < argc-1)
+      param.output[output_cnt].colour_primaries = parse_prim(argv[++i]);
+    else if(!strcmp(argv[i], "--colour-trc") && i < argc-1)
+      param.output[output_cnt].colour_trc = parse_trc(argv[++i]);
     else if(!strcmp(argv[i], "--last-frame-only"))
       param.last_frame_only = 1;
     else if(!strcmp(argv[i], "--dump-modules"))
       param.dump_modules = 1;
     else if(!strcmp(argv[i], "--dump-nodes"))
       dump_nodes = 1;
+    else if(!strcmp(argv[i], "--progress"))
+      param.print_progress = 1;
     else if(!strcmp(argv[i], "--output") && i < argc-1 && ++i)
       param.output[output_cnt++].inst = dt_token(argv[i]);
     else if(!strcmp(argv[i], "--device") && i < argc-1)
@@ -62,22 +93,28 @@ int main(int argc, char *argv[])
   }
   param.output_cnt = MAX(1, output_cnt);
 
-  if(qvk_init(gpu_name, gpu_id)) exit(1);
+  if(qvk_init(gpu_name, gpu_id, 0)) exit(1);
 
   if(!param.p_cfgfile)
   {
     fprintf(stderr, "usage: vkdt-cli -g <graph.cfg>\n"
     "    [-d verbosity]                set log verbosity (none,qvk,pipe,gui,db,cli,snd,perf,mem,err,all)\n"
     "    [--last-frame-only]           only write the last frame, not the intermediates\n"
+    "    [--progress]                  print some progress information (useful for long animations)\n"
     "    [--dump-modules|--dump-nodes] write graphvis dot files to stdout\n"
-    "    [--quality <0-100>]           jpg output quality\n"
+    "    [--quality <0-100>]           (jpg) output quality\n"
     "    [--width <x>]                 max output width\n"
     "    [--height <y>]                max output height\n"
     "    [--filename <f>]              output filename (without extension or frame number)\n"
     "    [--format <fm>]               output format (o-jpg, o-bc1, o-pfm, ..)\n"
     "    [--audio <file>]              dump output audio stream to this file, if any\n"
+    "    [--colour-prim <prim-id>]     colour primaries to use for encoding, one of:\n"
+    "                                  sRGB, bt2020, AdobeRGB, P3, XYZ\n"
+    "    [--colour-trc <trc-id>]       colour tone response curve for encoding, one of:\n"
+    "                                  linear, bt709, sRGB, PQ, DCI, HLG, gamma2.2, mclog\n"
     "    [--output <inst>]             name the instance of the output to write (can use multiple)\n"
-    "                                  this resets output specific options: quality, width, height, audio\n"
+    "                                  this harvests and then resets output specific options: quality, width, height,\n"
+    "                                  audio, colour-prim, colour-trc\n"
     "    [--device <gpu name>]         explicitly use this gpu if you have multiple\n"
     "    [--device-id <gpu id>]        explicitly use this gpu id if you have multiple\n"
     "    [--config]                    everything after this will be interpreted as additional cfg lines\n"
@@ -88,7 +125,7 @@ int main(int argc, char *argv[])
   }
 
   dt_graph_t graph;
-  dt_graph_init(&graph);
+  dt_graph_init(&graph, s_queue_compute);
 
   param.extra_param_cnt = config_start ? argc - config_start : 0;
   param.p_extra_param   = argv + config_start;

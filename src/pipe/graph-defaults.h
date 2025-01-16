@@ -4,6 +4,7 @@ static inline dt_token_t
 dt_graph_default_input_module(
     const char *filename) // main file, not the .cfg (will strip .cfg if present)
 {
+  // XXX remember to also look at the copy/paste history stack routine (TODO: unify this)
   int len = strlen(filename);
   if(len <= 4) return 0;
   int off = 4;
@@ -19,5 +20,7 @@ dt_graph_default_input_module(
   if(!strncasecmp(filename+len-off, ".mov", 4) ||
      !strncasecmp(filename+len-off, ".mp4", 4))
     return dt_token("i-vid");
+  if(len > 6 && !strncasecmp(filename+len-off-2, ".mcraw", 6))
+    return dt_token("i-mcraw");
   return dt_token("i-raw"); // you assume too much
 }

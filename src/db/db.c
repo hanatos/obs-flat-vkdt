@@ -2,6 +2,7 @@
 #include "thumbnails.h"
 #include "core/log.h"
 #include "core/fs.h"
+#include "core/sort.h"
 #include "pipe/graph-defaults.h"
 #include "stringpool.h"
 #include "exif.h"
@@ -15,6 +16,7 @@
 #include <time.h>
 #include <fcntl.h>
 #include <ctype.h>
+#include <inttypes.h>
 
 void
 dt_db_init(dt_db_t *db)
@@ -23,9 +25,10 @@ dt_db_init(dt_db_t *db)
   db->current_imgid = -1u;
   db->current_colid = -1u;
   fs_homedir(db->basedir, sizeof(db->basedir));
-  fs_mkdir(db->basedir, 0755);
+  fs_mkdir_p(db->basedir, 0755);
   // probably read preferences here from config file instead:
   db->collection_sort = s_prop_filename;
+  threads_mutex_init(&db->image_mutex, 0);
 }
 
 void
@@ -39,6 +42,7 @@ dt_db_cleanup(dt_db_t *db)
   free(db->collection);
   free(db->selection);
   free(db->image);
+  threads_mutex_destroy(&db->image_mutex);
   memset(db, 0, sizeof(*db));
 }
 
@@ -74,6 +78,20 @@ compare_labels(const void *a, const void *b, void *arg)
   return db->image[ia[0]].labels - db->image[ib[0]].labels;
 }
 
+void
+dt_db_read_createdate(const dt_db_t *db, uint32_t imgid, char createdate[20])
+{
+  char fn[1024], f[1024];
+  dt_db_image_path(db, imgid, fn, sizeof(fn));
+  fs_realpath(fn, f);
+  size_t off = strnlen(f, sizeof(f));
+  if(off > 4) f[off - 4] = 0;
+  else f[off] = 0;
+
+  char model[32];
+  dt_db_exif_mini(f, createdate, model, sizeof(model));
+}
+
 static int
 compare_createdate(const void *a, const void *b, void *arg)
 { // you ask for complicated sort, you get slow and stupid.
@@ -83,27 +101,8 @@ compare_createdate(const void *a, const void *b, void *arg)
   dt_db_t *db = arg;
   const uint32_t *ia = a, *ib = b;
   char cda[20] = {0}, cdb[20] = {0};
-  char fna[1024], fnb[1024], *aa = fna, *bb = fnb;
-  char fna2[1024], fnb2[1024];
-  dt_db_image_path(db, ia[0], fna, sizeof(fna));
-  dt_db_image_path(db, ib[0], fnb, sizeof(fnb));
-  size_t off;
-  off = readlink(fna, fna2, sizeof(fna2));
-  if(off != -1) aa = fna2;
-  else off = strnlen(fna, sizeof(fna));
-  if(off > 4) aa[off - 4] = 0;
-  else aa[off] = 0;
-
-  off = readlink(fnb, fnb2, sizeof(fnb2));
-  if(off != -1) bb = fnb2;
-  else off = strnlen(fnb, sizeof(fnb));
-  if(off > 4) bb[off - 4] = 0;
-  else bb[off] = 0;
-
-  char model[32];
-  dt_db_exif_mini(aa, cda, model, sizeof(model));
-  dt_db_exif_mini(bb, cdb, model, sizeof(model));
-
+  dt_db_read_createdate(db, ia[0], cda);
+  dt_db_read_createdate(db, ib[0], cdb);
   return strcmp(cda, cdb);
 }
 
@@ -131,50 +130,61 @@ void
 dt_db_update_collection(dt_db_t *db)
 {
   // filter
+  char createdate[20];
   db->collection_cnt = 0;
   for(int k=0;k<db->image_cnt;k++)
   {
-    switch(db->collection_filter)
+    for(int f=1;f<s_prop_cnt;f++)
     {
-    case s_prop_none:
-      break;
-    case s_prop_filename:
-      if(!strstr(db->image[k].filename, dt_token_str(db->collection_filter_val))) continue;
-      break;
-    case s_prop_rating:
-      if(!(db->image[k].rating >= db->collection_filter_val)) continue;
-      break;
-    case s_prop_labels:
-      if(!(db->image[k].labels & db->collection_filter_val)) continue;
-      break;
-    case s_prop_createdate:
-      // TODO: match beginning of filter val string
-      break;
-    case s_prop_filetype:
-      if(dt_graph_default_input_module(db->image[k].filename) != db->collection_filter_val) continue;
-      break;
+      if(db->collection_filter.active & (1<<f))
+      {
+        switch(f)
+        {
+        case s_prop_none:
+          break;
+        case s_prop_filename:
+          if(!strstr(db->image[k].filename, db->collection_filter.filename)) goto discard;
+          break;
+        case s_prop_rating:
+          if(db->collection_filter.rating_cmp == 0 && !(db->image[k].rating >= db->collection_filter.rating)) goto discard;
+          if(db->collection_filter.rating_cmp == 1 && !(db->image[k].rating == db->collection_filter.rating)) goto discard;
+          if(db->collection_filter.rating_cmp == 2 && !(db->image[k].rating <  db->collection_filter.rating)) goto discard;
+          break;
+        case s_prop_labels:
+          if(!(db->image[k].labels & db->collection_filter.labels)) goto discard;
+          break;
+        case s_prop_createdate:
+          dt_db_read_createdate(db, k, createdate);
+          if(!strstr(createdate, db->collection_filter.createdate)) goto discard;
+          break;
+        case s_prop_filetype:
+          if(dt_graph_default_input_module(db->image[k].filename) != db->collection_filter.filetype) goto discard;
+          break;
+        }
+      }
     }
     db->collection[db->collection_cnt++] = k;
+discard:;
   }
   // TODO: use db/tests/parallel radix sort
   switch(db->collection_sort)
   {
-  case s_prop_none:
+  case s_prop_none: case s_prop_cnt:
     break;
   case s_prop_filename:
-    qsort_r(db->collection, db->collection_cnt, sizeof(db->collection[0]), compare_filename, db);
+    sort(db->collection, db->collection_cnt, sizeof(db->collection[0]), compare_filename, db);
     break;
   case s_prop_rating:
-    qsort_r(db->collection, db->collection_cnt, sizeof(db->collection[0]), compare_rating, db);
+    sort(db->collection, db->collection_cnt, sizeof(db->collection[0]), compare_rating, db);
     break;
   case s_prop_labels:
-    qsort_r(db->collection, db->collection_cnt, sizeof(db->collection[0]), compare_labels, db);
+    sort(db->collection, db->collection_cnt, sizeof(db->collection[0]), compare_labels, db);
     break;
   case s_prop_createdate:
-    qsort_r(db->collection, db->collection_cnt, sizeof(db->collection[0]), compare_createdate, db);
+    sort(db->collection, db->collection_cnt, sizeof(db->collection[0]), compare_createdate, db);
     break;
   case s_prop_filetype:
-    qsort_r(db->collection, db->collection_cnt, sizeof(db->collection[0]), compare_filetype, db);
+    sort(db->collection, db->collection_cnt, sizeof(db->collection[0]), compare_filetype, db);
     break;
   }
 }
@@ -416,22 +426,22 @@ const uint32_t *dt_db_selection_get(dt_db_t *db)
 {
   switch(db->collection_sort)
   { // sync sorting criterion with collection
-  case s_prop_none:
+  case s_prop_none: case s_prop_cnt:
     break;
   case s_prop_filename:
-    qsort_r(db->selection, db->selection_cnt, sizeof(db->selection[0]), compare_filename, db);
+    sort(db->selection, db->selection_cnt, sizeof(db->selection[0]), compare_filename, db);
     break;
   case s_prop_rating:
-    qsort_r(db->selection, db->selection_cnt, sizeof(db->selection[0]), compare_rating, db);
+    sort(db->selection, db->selection_cnt, sizeof(db->selection[0]), compare_rating, db);
     break;
   case s_prop_labels:
-    qsort_r(db->selection, db->selection_cnt, sizeof(db->selection[0]), compare_labels, db);
+    sort(db->selection, db->selection_cnt, sizeof(db->selection[0]), compare_labels, db);
     break;
   case s_prop_createdate:
-    qsort_r(db->selection, db->selection_cnt, sizeof(db->selection[0]), compare_createdate, db);
+    sort(db->selection, db->selection_cnt, sizeof(db->selection[0]), compare_createdate, db);
     break;
   case s_prop_filetype:
-    qsort_r(db->selection, db->selection_cnt, sizeof(db->selection[0]), compare_filetype, db);
+    sort(db->selection, db->selection_cnt, sizeof(db->selection[0]), compare_filetype, db);
     break;
   }
   return db->selection;
@@ -443,8 +453,9 @@ int dt_db_read(dt_db_t *db, const char *filename)
   if(!f) return 1;
   char line[256];
   char imgn[256];
-  char what[256];
-  uint64_t num;
+  char what[256], val[256];
+  dt_db_filter_t *ft = &db->collection_filter;
+  ft->active = 0;
 
   uint32_t lno = 0;
   while(!feof(f))
@@ -454,7 +465,7 @@ int dt_db_read(dt_db_t *db, const char *filename)
     lno++;
 
     // scan filename:rating|labels:number
-    sscanf(line, "%[^:]:%[^:]:%lu", imgn, what, &num);
+    sscanf(line, "%[^:]:%[^:]:%s", imgn, what, val);
 
     if(!strcmp(imgn, "sort"))
     {
@@ -467,12 +478,11 @@ int dt_db_read(dt_db_t *db, const char *filename)
     }
     if(!strcmp(imgn, "filter"))
     {
-      if(!strcmp(what, "filename"))    db->collection_filter = s_prop_filename;
-      if(!strcmp(what, "rating"))      db->collection_filter = s_prop_rating;
-      if(!strcmp(what, "label"))       db->collection_filter = s_prop_labels;
-      if(!strcmp(what, "create date")) db->collection_filter = s_prop_createdate;
-      if(!strcmp(what, "file type"))   db->collection_filter = s_prop_filetype;
-      db->collection_filter_val = num;
+      if(!strcmp(what, "filename"))    { ft->active |= 1<<s_prop_filename;   snprintf(ft->filename, sizeof(ft->filename), "%s", val); }
+      if(!strcmp(what, "rating"))      { ft->active |= 1<<s_prop_rating;     ft->rating = atol(val); }
+      if(!strcmp(what, "label"))       { ft->active |= 1<<s_prop_labels;     ft->labels = atol(val); }
+      if(!strcmp(what, "create date")) { ft->active |= 1<<s_prop_createdate; snprintf(ft->createdate, sizeof(ft->createdate), "%s", val); }
+      if(!strcmp(what, "file type"))   { ft->active |= 1<<s_prop_filetype;   strncpy(dt_token_str(ft->filetype), val, 8); }
       continue;
     }
 
@@ -481,9 +491,9 @@ int dt_db_read(dt_db_t *db, const char *filename)
     if(imgid != -1u && imgid < db->image_cnt)
     {
       if     (!strcasecmp(what, "rating"))
-        db->image[imgid].rating = num;
+        db->image[imgid].rating = atol(val);
       else if(!strcasecmp(what, "labels"))
-        db->image[imgid].labels = num;
+        db->image[imgid].labels = atol(val);
       else
         dt_log(s_log_db|s_log_err, "no such property in line %u: '%s'", lno, line);
     }
@@ -502,8 +512,14 @@ int dt_db_write(const dt_db_t *db, const char *filename, int append)
   for(int i=0;i<db->collection_sort;i++,c++) while(*c) c++;
   fprintf(f, "sort:%s:\n", c);
   c = dt_db_property_text;
-  for(int i=0;i<db->collection_filter;i++,c++) while(*c) c++;
-  fprintf(f, "filter:%s:%lu\n", c, db->collection_filter_val);
+
+  const dt_db_filter_t *ft = &db->collection_filter;
+  if(ft->active & (1<<s_prop_filename))   fprintf(f, "filter:filename:%s\n",    ft->filename);
+  if(ft->active & (1<<s_prop_rating))     fprintf(f, "filter:rating:%u\n",      ft->rating);
+  if(ft->active & (1<<s_prop_labels))     fprintf(f, "filter:label:%u\n",       ft->labels);
+  if(ft->active & (1<<s_prop_createdate)) fprintf(f, "filter:create date:%s\n", ft->createdate);
+  if(ft->active & (1<<s_prop_filetype))   fprintf(f, "filter:file type:%s\n",   dt_token_str(ft->filetype));
+
   for(int i=0;i<db->image_cnt;i++)
   {
     if( db->image[i].rating          > 0) fprintf(f, "%s:rating:%u\n", db->image[i].filename, db->image[i].rating);
@@ -532,13 +548,11 @@ int dt_db_add_to_collection(const dt_db_t *db, const uint32_t imgid, const char 
 
   uint64_t hash = hash64(filename);
   char dirname[1040];
-  snprintf(dirname, sizeof(dirname), "%s/tags", db->basedir);
-  fs_mkdir(dirname, 0755);
   snprintf(dirname, sizeof(dirname), "%s/tags/%s", db->basedir, cname);
-  fs_mkdir(dirname, 0755); // ignore error, might exist already (which is fine)
+  fs_mkdir_p(dirname, 0755); // ignore error, might exist already (which is fine)
   char linkname[1040];
-  snprintf(linkname, sizeof(linkname), "%s/tags/%s/%lx.cfg", db->basedir, cname, hash);
-  int err = symlink(filename, linkname);
+  snprintf(linkname, sizeof(linkname), "%s/tags/%s/%"PRIx64".cfg", db->basedir, cname, hash);
+  int err = fs_symlink(filename, linkname);
   if(err) return 1;
   return 0;
 }
@@ -549,7 +563,7 @@ void dt_db_remove_selected_images(
     const int del)
 {
   // sort selection array by id:
-  qsort_r(db->selection, db->selection_cnt, sizeof(db->selection[0]), compare_id, db);
+  sort(db->selection, db->selection_cnt, sizeof(db->selection[0]), compare_id, db);
 
   // go through sorted list of imgid, largest id first:
   char fullfn[2048] = {0};

@@ -1,6 +1,6 @@
 #include "qvk/qvk.h"
 #include "pipe/graph.h"
-#include "pipe/io.h"
+#include "pipe/asciiio.h"
 #include "pipe/graph-io.h"
 #include "pipe/graph-export.h"
 #include "pipe/global.h"
@@ -240,7 +240,7 @@ int main(int argc, char *argv[])
     { config_start = i+1; break; }
   }
 
-  if(qvk_init(0, -1)) exit(1);
+  if(qvk_init(0, -1, 0)) exit(1);
 
   if(!graph_cfg || !dat.param_cnt)
   {
@@ -258,7 +258,7 @@ int main(int argc, char *argv[])
     exit(1);
   }
 
-  dt_graph_init(&dat.graph);
+  dt_graph_init(&dat.graph, s_queue_compute);
   VkResult err = dt_graph_read_config_ascii(&dat.graph, graph_cfg);
   if(err)
   {

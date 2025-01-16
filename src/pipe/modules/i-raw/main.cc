@@ -1,4 +1,9 @@
 // unfortunately, since we'll link to rawspeed, we need c++ here.
+extern "C" {
+#include "modules/api.h"
+#include "dng_opcode.h"
+#include "dng_opcode_decode.c"
+}
 #include "RawSpeed-API.h"
 #include "mat3.h"
 #include <omp.h>
@@ -9,6 +14,9 @@
 #ifdef VKDT_USE_EXIV2
 #include "exif.h"
 #endif
+#ifdef _WIN64
+#include <Windows.h> 
+#endif
 
 extern "C" {
 #include "modules/api.h"
@@ -18,7 +26,13 @@ static rawspeed::CameraMetaData *meta = 0;
 
 int rawspeed_get_number_of_processor_cores()
 {
+#ifdef _WIN64
+  SYSTEM_INFO si;
+  GetSystemInfo(&si);
+  return si.dwNumberOfProcessors;
+#else
   return sysconf(_SC_NPROCESSORS_ONLN);
+#endif
 }
 
 typedef struct rawinput_buf_t
@@ -26,6 +40,8 @@ typedef struct rawinput_buf_t
   std::unique_ptr<rawspeed::RawDecoder> d;
   char filename[PATH_MAX] = {0};
   int ox, oy;
+  dt_dng_opcode_list_t *dng_opcode_lists[3];
+  dt_image_metadata_dngop_t dngop;
 }
 rawinput_buf_t;
 
@@ -74,6 +90,11 @@ void
 free_raw(dt_module_t *mod)
 { // free auto pointers
   rawinput_buf_t *mod_data = (rawinput_buf_t *)mod->data;
+  for(int i=0;i<3;i++)
+  {
+    dng_opcode_list_free(mod_data->dng_opcode_lists[i]);
+    mod_data->dng_opcode_lists[i] = NULL;
+  }
   if(mod_data->d.get()) mod_data->d.reset();
 }
 
@@ -120,9 +141,9 @@ load_raw(
     // TODO: do some corruption detection and support for esoteric formats/fails here
     // the data type doesn't seem to be inited on hdrmerge raws:
     // if(mod_data->d->mRaw->getDataType() == rawspeed::TYPE_FLOAT32)
-    if(sizeof(uint16_t) != r->getBpp())
+    if(sizeof(uint16_t) != r->getBpp()/r->getCpp())
     {
-      dt_log(s_log_err, "[i-raw] unhandled pixel format: %s\n", filename);
+      dt_log(s_log_err, "[i-raw] unhandled pixel format %d bpp : %s\n", r->getBpp(), filename);
       return 1;
     }
   }
@@ -219,8 +240,22 @@ void modify_roi_out(
   float *noise_b = (float*)dt_module_param_float(mod, 2);
   for(int k=0;k<9;k++)
   mod->img_param.cam_to_rec2020[k] = 0.0f/0.0f; // mark as uninitialised
-#ifdef VKDT_USE_EXIV2 // now essentially only for exposure time/aperture value
-  dt_exif_read(&mod->img_param, filename); // FIXME: will not work for timelapses
+  mod->img_param.colour_primaries = s_colour_primaries_custom;
+  mod->img_param.colour_trc       = s_colour_trc_linear;
+  for(int i =0;i<3;i++)
+    mod_data->dng_opcode_lists[i] = nullptr;
+  mod->img_param.meta = 0;
+#ifdef VKDT_USE_EXIV2 // now essentially only for exposure time/aperture value and DNG opcodes
+  dt_exif_read(&mod->img_param, filename, mod_data->dng_opcode_lists); // FIXME: will not work for timelapses
+
+  if(mod_data->dng_opcode_lists[0] || mod_data->dng_opcode_lists[1] || mod_data->dng_opcode_lists[2])
+  {
+    mod_data->dngop.type = s_image_metadata_dngop;
+    mod_data->dngop.op_list[0] = mod_data->dng_opcode_lists[0];
+    mod_data->dngop.op_list[1] = mod_data->dng_opcode_lists[1];
+    mod_data->dngop.op_list[2] = mod_data->dng_opcode_lists[2];
+    mod->img_param.meta = dt_metadata_append(mod->img_param.meta, (dt_image_metadata_t*)&mod_data->dngop);
+  }
 #endif
   // set a bit of metadata from rawspeed, overwrite exiv2 because this one is more consistent:
   snprintf(mod->img_param.maker, sizeof(mod->img_param.maker), "%s", mod_data->d->mRaw->metadata.canonical_make.c_str());
@@ -260,12 +295,13 @@ void modify_roi_out(
   mod->img_param.crop_aabb[2] = cropTL.x + dimCropped.x;
   mod->img_param.crop_aabb[3] = cropTL.y + dimCropped.y;
 
-  if(mod_data->d->mRaw->blackLevelSeparate[0] == -1)
+  if(!mod_data->d->mRaw->blackAreas.empty() || !mod_data->d->mRaw->blackLevelSeparate)
     mod_data->d->mRaw->calculateBlackAreas();
+  const auto bl = *(mod_data->d->mRaw->blackLevelSeparate->getAsArray1DRef());
   for(int k=0;k<4;k++)
   {
-    mod->img_param.black[k]        = mod_data->d->mRaw->blackLevelSeparate[k];
-    mod->img_param.white[k]        = mod_data->d->mRaw->whitePoint;
+    mod->img_param.black[k]        = bl(k);
+    mod->img_param.white[k]        = mod_data->d->mRaw->whitePoint.value_or((1u << 16)-1);
     mod->img_param.whitebalance[k] = mod_data->d->mRaw->metadata.wbCoeffs[k];
   }
   // normalise wb
@@ -274,7 +310,8 @@ void modify_roi_out(
   mod->img_param.whitebalance[3] /= mod->img_param.whitebalance[1];
   mod->img_param.whitebalance[1] = 1.0f;
 
-  if(isnanf(mod->img_param.cam_to_rec2020[0]))
+  float test = mod->img_param.cam_to_rec2020[0];
+  if(!(test == test))
   { // camera matrix not found in exif or compiled without exiv2
     float xyz_to_cam[12], mat[9] = {0};
     if(mod_data->d->mRaw->metadata.colorMatrix.size() > 0)
@@ -306,7 +343,12 @@ void modify_roi_out(
 
   // uncrop bayer sensor filter
   mod->img_param.filters = mod_data->d->mRaw->cfa.getDcrawFilter();
-  if(mod->img_param.filters != 9u)
+  if(mod_data->d->mRaw->getCpp() == 3)
+  {
+    mod->img_param.filters = 0;
+    mod->connector[0].chan = dt_token("rgba");
+  }
+  else if(mod->img_param.filters != 9u)
     mod->img_param.filters = rawspeed::ColorFilterArray::shiftDcrawFilter(
         mod_data->d->mRaw->cfa.getDcrawFilter(),
         cropTL.x, cropTL.y);
@@ -352,7 +394,7 @@ void modify_roi_out(
       else        oy += 3;
     }
   }
-  else // move to std bayer sensor offset
+  else if(mod->img_param.filters) // move to std bayer sensor offset
   {
     uint32_t f = mod->img_param.filters;
     if(FC(0,0,f) == 1)
@@ -365,30 +407,33 @@ void modify_roi_out(
       ox = oy = 1;
     }
   }
-  // unfortunately need to round to full 6x6 block for xtrans
-  const int block = mod->img_param.filters == 9u ? 3 : 2;
-  const int bigblock = mod->img_param.filters == 9u ? 6 : 2;
-  // crop aabb is relative to buffer we emit,
-  // so we need to move it along to the CFA pattern boundary
-  uint32_t *b = mod->img_param.crop_aabb;
-  b[2] -= ox;
-  b[3] -= oy;
-  // fprintf(stderr, "off %d %d\n", ox, oy);
-  // fprintf(stderr, "box %u %u %u %u\n", b[0], b[1], b[2], b[3]);
-  // and also we'll round it to cut only between CFA blocks
-  b[0] = ((b[0] + bigblock - 1) / bigblock) * bigblock;
-  b[1] = ((b[1] + bigblock - 1) / bigblock) * bigblock;
-  b[2] =  (b[2] / block) * block;
-  b[3] =  (b[3] / block) * block;
-  // fprintf(stderr, "bor %u %u %u %u\n", b[0], b[1], b[2], b[3]);
 
+  if(mod->img_param.filters)
+  { // unfortunately need to round to full 6x6 block for xtrans
+    const int block = mod->img_param.filters == 9u ? 3 : 2;
+    const int bigblock = mod->img_param.filters == 9u ? 6 : 2;
+    // crop aabb is relative to buffer we emit,
+    // so we need to move it along to the CFA pattern boundary
+    uint32_t *b = mod->img_param.crop_aabb;
+    b[2] -= ox;
+    b[3] -= oy;
+    // fprintf(stderr, "off %d %d\n", ox, oy);
+    // fprintf(stderr, "box %u %u %u %u\n", b[0], b[1], b[2], b[3]);
+    // and also we'll round it to cut only between CFA blocks
+    b[0] = ((b[0] + bigblock - 1) / bigblock) * bigblock;
+    b[1] = ((b[1] + bigblock - 1) / bigblock) * bigblock;
+    b[2] =  (b[2] / block) * block;
+    b[3] =  (b[3] / block) * block;
+    // fprintf(stderr, "bor %u %u %u %u\n", b[0], b[1], b[2], b[3]);
+    ro->full_wd -= ox;
+    ro->full_ht -= oy;
+    // round down to full block size:
+    ro->full_wd = (ro->full_wd/block)*block;
+    ro->full_ht = (ro->full_ht/block)*block;
+  }
+  
   mod_data->ox = ox;
   mod_data->oy = oy;
-  ro->full_wd -= ox;
-  ro->full_ht -= oy;
-  // round down to full block size:
-  ro->full_wd = (ro->full_wd/block)*block;
-  ro->full_ht = (ro->full_ht/block)*block;
 }
 
 int read_source(
@@ -411,6 +456,15 @@ int read_source(
   int wd = dim_uncropped.x;
   int ht = dim_uncropped.y;
 
+  if(mod_data->d->mRaw->getCpp() == 3)
+  { // colour "raw"
+    if(mod->connector[0].roi.wd < wd || mod->connector[0].roi.ht < ht) return 0;
+    for(int j=0;j<ht;j++) for(int i=0;i<wd;i++) for(int k=0;k<4;k++)
+      buf[4*(j*wd+i)+k] = k==3 ? 65535 : mod_data->d->mRaw->getU16DataAsUncroppedArray2DRef()(j,3*i+k);
+    return 0;
+  }
+
+  // mosaic pattern
   int ox = mod_data->ox;
   int oy = mod_data->oy;
   wd -= ox;

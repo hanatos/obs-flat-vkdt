@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <assert.h>
+#include <inttypes.h>
 
 void
 dt_vkalloc_init(dt_vkalloc_t *a, uint64_t pool_size, uint64_t bytesize)
@@ -40,14 +41,14 @@ dt_vkalloc_nuke(dt_vkalloc_t *a)
   a->peak_rss = a->rss = a->vmsize = 0ul;
 }
 
-// feedback version of allocation:
+// protected version of allocation:
 // these buffers will be persistent for the next frame, i.e. can't be freed
 // need memory that has no dual use (i.e. used before and then freed)
 // - use last entry in free list
 // - split potentially into three
 // - memory offset is vmsize + alignment
 dt_vkmem_t*
-dt_vkalloc_feedback(dt_vkalloc_t *a, uint64_t size, uint64_t alignment)
+dt_vkalloc_protected(dt_vkalloc_t *a, uint64_t size, uint64_t alignment)
 {
   if(!alignment) alignment = 1;
   assert(!dt_vkalloc_check(a));
@@ -141,7 +142,7 @@ dt_vkalloc(dt_vkalloc_t *a, uint64_t size, uint64_t alignment)
       size_t end = l->offset_orig + l->size;
       mem->offset_orig = l->offset_orig;
       mem->offset = ((l->offset_orig + (alignment-1)) & ~(alignment-1));
-      assert(size < 1ul<<48);
+      assert(size < ((uint64_t)1ul)<<48);
       mem->size = size;
       l->offset = l->offset_orig = mem->offset + mem->size;
       assert(end >= l->offset_orig);
@@ -257,7 +258,7 @@ dt_vkalloc_check(dt_vkalloc_t *a)
   uint64_t num_unused = DLIST_LENGTH(a->unused);
   if(num_used + num_free + num_unused != a->pool_size)
   {
-    fprintf(stderr, "used %lu free %lu unused %lu != %lu\n", num_used, num_free, num_unused, a->pool_size);
+    fprintf(stderr, "used %"PRIu64" free %"PRIu64" unused %"PRIu64" != %"PRIu64"\n", num_used, num_free, num_unused, a->pool_size);
     return 1;
   }
 

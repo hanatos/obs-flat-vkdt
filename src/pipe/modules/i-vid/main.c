@@ -3,6 +3,7 @@
 // hand it down to vk video for decoding
 
 #include "modules/api.h"
+#include "core/fs.h"
 
 #include <libavformat/avformat.h>
 #include <libavformat/avio.h>
@@ -386,9 +387,7 @@ close_stream(vid_data_t *d)
   avformat_close_input(&d->fmtc);
   if(d->mp4) av_bsf_free(&d->vbsfc);
   if(d->mp4) av_bsf_free(&d->absfc);
-  avcodec_close(d->vctx); // will clean up codec, not context
   avcodec_free_context(&d->vctx);
-  avcodec_close(d->actx);
   avcodec_free_context(&d->actx);
   memset(d, 0, sizeof(*d));
 }
@@ -438,12 +437,7 @@ void modify_roi_out(
     .noise_a = 1.0, // gauss
     .noise_b = 1.0, // poisson
   };
-  struct stat statbuf;
-  if(!stat(filename, &statbuf))
-  {
-    struct tm result;
-    strftime(mod->img_param.datetime, 20, "%Y:%m:%d %H:%M:%S", localtime_r(&statbuf.st_mtime, &result));
-  }
+  fs_createdate(filename, mod->img_param.datetime);
   // snprintf(mod->img_param.model, sizeof(mod->img_param), "%s", dat->video.IDNT.cameraName);
   // snprintf(mod->img_param.maker, sizeof(mod->img_param), "%s", dat->video.IDNT.cameraName);
   // for(int i=0;i<sizeof(mod->img_param.maker);i++) if(mod->img_param.maker[i] == ' ') mod->img_param.maker[i] = 0;
@@ -575,7 +569,8 @@ error:
 
 int audio(
     dt_module_t  *mod,
-    const int     frame,
+    uint64_t      sample_beg,
+    uint32_t      sample_cnt,
     uint8_t     **samples)
 {
   vid_data_t *d = mod->data;
@@ -630,13 +625,6 @@ int audio(
       }
     }
     memcpy(((uint8_t*)d->sndbuf) + written*bps*channels, input_l, d->aframe->nb_samples * bps * channels);
-#if 0
-    for(int i=0;i<d->aframe->nb_samples;i++)
-    {
-      d->sndbuf[2*(i+written)+0] = input_l[i];
-      d->sndbuf[2*(i+written)+1] = input_r[i];
-    }
-#endif
     written += d->aframe->nb_samples;
     d->snd_lag = written - need_samples;
   } while(d->snd_lag < 0);

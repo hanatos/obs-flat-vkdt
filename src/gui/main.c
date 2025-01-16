@@ -1,5 +1,4 @@
 #include "qvk/qvk.h"
-
 #include "pipe/graph.h"
 #include "pipe/graph-io.h"
 #include "pipe/global.h"
@@ -13,6 +12,7 @@
 #include "gui/render.h"
 #include "gui/view.h"
 #include "db/db.h"
+#include "nk.h"
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -38,7 +38,8 @@ get_current_monitor(GLFWwindow *window)
 
   int wx, wy, ww, wh;
   glfwGetWindowPos(window, &wx, &wy);
-  glfwGetWindowSize(window, &ww, &wh);
+  glfwGetFramebufferSize(window, &ww, &wh);
+
   int nmonitors;
   GLFWmonitor **monitors = glfwGetMonitors(&nmonitors);
 
@@ -63,37 +64,38 @@ get_current_monitor(GLFWwindow *window)
   return bestmonitor;
 }
 
+static inline int
+gamepad_changed(
+    GLFWgamepadstate *last,
+    GLFWgamepadstate *curr)
+{
+  for(int i=0;i<sizeof(curr->buttons)/sizeof(curr->buttons[0]);i++)
+    if(curr->buttons[i] != last->buttons[i])
+      return 1;
+  for(int i=0;i<sizeof(curr->axes)/sizeof(curr->axes[0]);i++)
+    if(fabsf(curr->axes[i] - last->axes[i]) > 0.1)
+      return 1;
+  return 0;
+}
+
 // since in glfw, joysticks can only be polled and have no event interface
 // (see this pull request: https://github.com/glfw/glfw/pull/1590)
 // we need to look for changes in a busy loop in this dedicated thread.
 // once we find activity, we'll step outside the glfwWaitEvents call by
 // posting an empty event from here.
+// note that the actual joystick callbacks will be handled there, in
+// the gui thread. here, we only detect change and raise the flag.
 static void*
 joystick_active(void *unused)
 {
-  uint8_t prev_butt[100] = {0};
-  while(!glfwWindowShouldClose(qvk.window))
+  static GLFWgamepadstate last = {0};
+  GLFWgamepadstate curr;
+  while(!glfwWindowShouldClose(vkdt.win.window))
   {
-    int res = 0;
-    int axes_cnt = 0, butt_cnt = 0;
-    const float   *axes = glfwGetJoystickAxes   (GLFW_JOYSTICK_1, &axes_cnt);
-    const uint8_t *butt = glfwGetJoystickButtons(GLFW_JOYSTICK_1, &butt_cnt);
-    assert(butt_cnt < 100);
-    assert(axes_cnt < 100);
-    for(int i=0;i<butt_cnt;i++) if(butt[i] != prev_butt[i])
+    if(!glfwGetGamepadState(GLFW_JOYSTICK_1, &curr)) break; // no more joystick?
+    if(gamepad_changed(&last, &curr))
     {
-      prev_butt[i] = butt[i];
-      res = 1;
-      break;
-    }
-    float restpos[20] = {0.0f, 0.0f, -1.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f}; // rest positions of the dual shock 3
-    for(int i=0;i<MIN(20,axes_cnt);i++) if(fabsf(axes[i] - restpos[i]) > 0.25)
-    {
-      res = 1;
-      break;
-    }
-    if(res)
-    {
+      last = curr;
       vkdt.wstate.busy = 20; // make sure we'll stay awake for a few frames
       glfwPostEmptyEvent();
     }
@@ -106,35 +108,35 @@ joystick_active(void *unused)
 static void
 toggle_fullscreen()
 {
-  GLFWmonitor* monitor = get_current_monitor(qvk.window);
+  GLFWmonitor* monitor = get_current_monitor(vkdt.win.window);
   const GLFWvidmode* mode = glfwGetVideoMode(monitor);
   if(g_fullscreen)
   {
-    glfwSetWindowPos(qvk.window, mode->width/8, mode->height/8);
-    glfwSetWindowSize(qvk.window, mode->width/4 * 3, mode->height/4 * 3);
+    glfwWindowHint(GLFW_DECORATED, GLFW_TRUE);
+    glfwSetWindowMonitor(vkdt.win.window, 0, mode->width/8, mode->height/8, 3*mode->width/4, 3*mode->height/4, mode->refreshRate);
     g_fullscreen = 0;
   }
   else
   {
-    glfwSetWindowPos(qvk.window, 0, 0);
-    glfwSetWindowSize(qvk.window, mode->width, mode->height);
+    glfwSetWindowMonitor(vkdt.win.window, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
     g_fullscreen = 1;
   }
-  dt_gui_recreate_swapchain();
-  dt_gui_init_fonts();
 }
 
 static void
 key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
 {
-  const int grabbed = vkdt.wstate.grabbed;
   dt_view_keyboard(window, key, scancode, action, mods);
-  if(!grabbed) // also don't pass on if we just ungrabbed
-    dt_gui_imgui_keyboard(window, key, scancode, action, mods);
+  if(!vkdt.wstate.grabbed)
+    nk_glfw3_keyboard_callback(window, key, scancode, action, mods);
 
-  if(key == GLFW_KEY_X && action == GLFW_PRESS && mods == GLFW_MOD_CONTROL)
+  if(key == GLFW_KEY_ESCAPE) // TODO: or gamepad equivalent
   {
-    glfwSetWindowShouldClose(qvk.window, GLFW_TRUE);
+    if(vkdt.wstate.popup) vkdt.wstate.popup = 0; // close any popup
+  }
+  else if(key == GLFW_KEY_X && action == GLFW_PRESS && mods == GLFW_MOD_CONTROL)
+  {
+    glfwSetWindowShouldClose(vkdt.win.window, GLFW_TRUE);
   }
   else if(key == GLFW_KEY_F11 && action == GLFW_PRESS)
   {
@@ -147,54 +149,51 @@ mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
 {
   dt_view_mouse_button(window, button, action, mods);
   if(!vkdt.wstate.grabbed)
-    dt_gui_imgui_mouse_button(window, button, action, mods);
+    nk_glfw3_mouse_button_callback(window, button, action, mods);
 }
 
 static void
 mouse_position_callback(GLFWwindow* window, double x, double y)
 {
-  dt_view_mouse_position(window, x, y);
+  float xscale, yscale;
+  dt_gui_content_scale(window, &xscale, &yscale);
+  dt_view_mouse_position(window, x*xscale, y*yscale);
+  if(!vkdt.wstate.grabbed)
+    nk_glfw3_mouse_position_callback(window, x*xscale, y*yscale);
 }
 
 static void
 window_close_callback(GLFWwindow* window)
 {
-  glfwSetWindowShouldClose(qvk.window, GLFW_TRUE);
-}
-
-static void
-window_size_callback(GLFWwindow* window, int width, int height)
-{
-  // window resized, need to rebuild our swapchain:
-  dt_gui_recreate_swapchain();
-  dt_gui_init_fonts();
-}
-
-static void
-window_pos_callback(GLFWwindow* window, int xpos, int ypos)
-{
-  dt_gui_imgui_window_position(window, xpos, ypos);
+  glfwSetWindowShouldClose(vkdt.win.window, GLFW_TRUE);
 }
 
 static void
 char_callback(GLFWwindow* window, unsigned int c)
 {
   if(!vkdt.wstate.grabbed)
-    dt_gui_imgui_character(window, c);
+    nk_glfw3_char_callback(window, c);
 }
 
 static void
 scroll_callback(GLFWwindow *window, double xoff, double yoff)
 {
+  float xscale, yscale;
+  dt_gui_content_scale(window, &xscale, &yscale);
+  xoff *= xscale;
+  yoff *= yscale;
   dt_view_mouse_scrolled(window, xoff, yoff);
   if(!vkdt.wstate.grabbed)
-    dt_gui_imgui_scrolled(window, xoff, yoff);
+    nk_glfw3_scroll_callback(window, xoff, yoff);
 }
 
 #if VKDT_USE_PENTABLET==1
 static void
 pentablet_data_callback(double x, double y, double z, double pressure, double pitch, double yaw, double roll)
 {
+  float xscale, yscale;
+  dt_gui_content_scale(vkdt.win.window, &xscale, &yscale);
+  x *= xscale; y *= yscale;
   dt_view_pentablet_data(x, y, z, pressure, pitch, yaw, roll);
 }
 
@@ -226,12 +225,12 @@ int main(int argc, char *argv[])
   {
     if(!strcmp(argv[1], "--version"))
     {
-      printf("vkdt "VKDT_VERSION" (c) 2020--2023 johannes hanika\n");
+      printf("vkdt "VKDT_VERSION" (c) 2020--2024 johannes hanika\n");
       exit(0);
     }
     else if(!strcmp(argv[1], "--help"))
     {
-      printf("vkdt "VKDT_VERSION" (c) 2020--2023 johannes hanika\n");
+      printf("vkdt "VKDT_VERSION" (c) 2020--2024 johannes hanika\n");
       dt_tool_print_usage();
       dt_gui_print_usage();
       exit(0);
@@ -241,6 +240,7 @@ int main(int argc, char *argv[])
   // init global things, log and pipeline:
   dt_log_init(s_log_err|s_log_gui);
   int lastarg = dt_log_init_arg(argc, argv);
+  dt_log(s_log_gui, "vkdt "VKDT_VERSION" (c) 2020--2024 johannes hanika");
   dt_pipe_global_init();
   threads_global_init();
   dt_set_signal_handlers();
@@ -251,18 +251,20 @@ int main(int argc, char *argv[])
     exit(1);
   }
 
-  // start fullscreen on current monitor, we only know which one is that after
+  // start un-fullscreen on current monitor, we only know which one is that after
   // we created the window in dt_gui_init(). maybe should be a config option:
+  g_fullscreen = 1;
   toggle_fullscreen();
+  dt_gui_recreate_swapchain(&vkdt.win);
+  nk_glfw3_resize(vkdt.win.window, vkdt.win.width, vkdt.win.height);
+  dt_gui_init_fonts();
 
-  glfwSetKeyCallback(qvk.window, key_callback);
-  glfwSetWindowSizeCallback(qvk.window, window_size_callback);
-  glfwSetWindowPosCallback(qvk.window, window_pos_callback);
-  glfwSetMouseButtonCallback(qvk.window, mouse_button_callback);
-  glfwSetCursorPosCallback(qvk.window, mouse_position_callback);
-  glfwSetCharCallback(qvk.window, char_callback);
-  glfwSetScrollCallback(qvk.window, scroll_callback);
-  glfwSetWindowCloseCallback(qvk.window, window_close_callback);
+  glfwSetKeyCallback(vkdt.win.window, key_callback);
+  glfwSetMouseButtonCallback(vkdt.win.window, mouse_button_callback);
+  glfwSetCursorPosCallback(vkdt.win.window, mouse_position_callback);
+  glfwSetCharCallback(vkdt.win.window, char_callback);
+  glfwSetScrollCallback(vkdt.win.window, scroll_callback);
+  glfwSetWindowCloseCallback(vkdt.win.window, window_close_callback);
 #if VKDT_USE_PENTABLET==1
   glfwSetPenTabletDataCallback(pentablet_data_callback);
   glfwSetPenTabletCursorCallback(pentablet_cursor_callback);
@@ -283,14 +285,16 @@ int main(int argc, char *argv[])
   {
     char defpath[1024];
     const char *mru = dt_rc_get(&vkdt.rc, "gui/ruc_entry00", "null");
-    if(strcmp(mru, "null")) snprintf(defpath, sizeof(defpath), "%s", mru);
-    else snprintf(defpath, sizeof(defpath), "%s/Pictures", getenv("HOME"));
-    if(argc > lastarg+1) filename = realpath(argv[lastarg+1], 0);
-    else                 filename = realpath(defpath, 0);
+    if(strcmp(mru, "null"))
+    {
+      snprintf(defpath, sizeof(defpath), "%s", mru);
+      for(int i=0;i<sizeof(defpath) && defpath[i];i++) if(defpath[i] == '&') { defpath[i] = 0; break; }
+    }
+    else fs_picturesdir(defpath, sizeof(defpath));
+    if(argc > lastarg+1) filename = fs_realpath(argv[lastarg+1], 0);
+    else                 filename = fs_realpath(defpath, 0);
   }
-  struct stat statbuf = {0};
-  if(filename) stat(filename, &statbuf);
-  if(!filename || ((statbuf.st_mode & S_IFMT) == S_IFDIR))
+  if(!filename || fs_isdir_file(filename))
   {
     vkdt.view_mode = s_view_lighttable;
     dt_db_load_directory(&vkdt.db, &vkdt.thumbnails, filename);
@@ -301,11 +305,15 @@ int main(int argc, char *argv[])
   {
     if(dt_db_load_image(&vkdt.db, &vkdt.thumbnails, filename))
     {
-      dt_log(s_log_err, "image could not be loaded!");
-      goto out;
+      dt_log(s_log_err, "image `%s' could not be loaded!", filename);
+      dt_gui_notification("image `%s' could not be loaded!", filename);
+      dt_view_switch(s_view_files);
     }
-    dt_db_selection_add(&vkdt.db, 0);
-    dt_view_switch(s_view_darkroom);
+    else
+    {
+      dt_db_selection_add(&vkdt.db, 0);
+      dt_view_switch(s_view_darkroom);
+    }
   }
   dt_gui_read_tags();
 
@@ -316,10 +324,11 @@ int main(int argc, char *argv[])
 
   // main loop
   double beg_rf = dt_time();
-  const int frame_limiter = dt_rc_get_int(&vkdt.rc, "gui/frame_limiter", 0);
+  const int frame_limiter = dt_rc_get_int(&vkdt.rc, "gui/frame_limiter", 6); // default: cap ui at 160fps
   vkdt.wstate.busy = 3;
   vkdt.graph_dev.frame = vkdt.state.anim_frame = 0;
-  while(!glfwWindowShouldClose(qvk.window))
+  GLFWgamepadstate gamepad_last = {0};
+  while(!glfwWindowShouldClose(vkdt.win.window))
   {
     // block and wait for one event instead of polling all the time to save on
     // gpu workload. might need an interrupt for "render finished" etc. we might
@@ -331,36 +340,54 @@ int main(int argc, char *argv[])
       vkdt.wstate.busy = vkdt.state.anim_max_frame == -1 ? 3 : vkdt.state.anim_max_frame - vkdt.state.anim_frame + 1;
     if(vkdt.wstate.busy > 0) glfwPostEmptyEvent();
     else vkdt.wstate.busy = 3;
-    // should probably consider this instead:
-    // https://github.com/bvgastel/imgui/commits/imgui-2749
-    glfwWaitEvents();
+
     if(frame_limiter || (dt_log_global.mask & s_log_perf))
     { // artificially limit frames rate to frame_limiter milliseconds/frame as minimum.
       double end_rf = dt_time();
-      dt_log(s_log_perf, "fps %.2g", 1.0/(end_rf - beg_rf));
       if(frame_limiter && end_rf - beg_rf < frame_limiter / 1000.0)
       {
         usleep(frame_limiter * 1000);
         continue;
       }
+      // dt_log(s_log_perf, "fps %.2g", 1.0/(end_rf - beg_rf));
       beg_rf = end_rf;
     }
 
-    dt_gui_render_frame_imgui();
+    // collect input from windows for our contexts.
+    // enable mouse grab only on wayland (is buggy on x11 and windows for wacom, see https://github.com/hanatos/vkdt/issues/144)
+    nk_glfw3_input_begin(&vkdt.ctx, vkdt.win.window, vkdt.session_type == 1);
+    if(vkdt.win1.window)
+      nk_glfw3_input_begin(&vkdt.ctx1, vkdt.win1.window, vkdt.session_type == 1);
+
+    glfwWaitEvents();
+
+    nk_glfw3_input_end(&vkdt.ctx, vkdt.win.window, vkdt.session_type == 1);
+    if(vkdt.win1.window)
+      nk_glfw3_input_end(&vkdt.ctx1, vkdt.win1.window, vkdt.session_type == 1);
+
+    if(vkdt.wstate.have_joystick)
+    {
+      GLFWgamepadstate gamepad_curr;
+      if (!glfwGetGamepadState(GLFW_JOYSTICK_1, &gamepad_curr)) vkdt.wstate.have_joystick = 0;
+      else if(gamepad_changed(&gamepad_last, &gamepad_curr))
+      {
+        dt_view_gamepad(vkdt.win.window, &gamepad_last, &gamepad_curr);
+        gamepad_last = gamepad_curr;
+      }
+    }
+
+    dt_view_process(); // process before render/preset because this might swap the output image backbuffers
+    if(vkdt.graph_dev.gui_msg && vkdt.graph_dev.gui_msg[0]) dt_gui_notification(vkdt.graph_dev.gui_msg);
 
     if(dt_gui_render() == VK_SUCCESS)
       dt_gui_present();
-    else
-      dt_gui_recreate_swapchain();
-
-    dt_view_process();
-    if(vkdt.graph_dev.gui_msg && vkdt.graph_dev.gui_msg[0]) dt_gui_notification(vkdt.graph_dev.gui_msg);
   }
   if(joystick_present) pthread_join(joystick_thread, 0);
 
-  QVKL(&qvk.queue_mutex, vkDeviceWaitIdle(qvk.device));
+  for(int q=0;q<s_queue_cnt;q++)
+    if(qvk.qid[q] == q)
+      QVKL(&qvk.queue[qvk.qid[q]].mutex, vkQueueWaitIdle(qvk.queue[qvk.qid[q]].queue));
 
-out:
   // leave whatever view we're still in:
   dt_view_switch(s_view_cnt);
 

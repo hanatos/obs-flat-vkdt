@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/threads.h"
+
 #include <stdint.h>
 #include <string.h>
 #include <strings.h>
@@ -48,6 +50,7 @@ typedef enum dt_db_property_t
   s_prop_labels      = 3, // &
   s_prop_createdate  = 4,
   s_prop_filetype    = 5, // == input module token
+  s_prop_cnt         = 6, // number of possible properties
 }
 dt_db_property_t;
 
@@ -58,11 +61,22 @@ dt_db_property_text =
   "none\0"
   "filename\0"
   "rating\0"
-  "label\0"
+  "labels\0"
   "create date\0"
   "file type\0"
   "\0"
 };
+
+typedef struct dt_db_filter_t
+{
+  uint64_t   active;             // bitmask of 1<<property which filters are active
+  char       filename[20];
+  uint32_t   rating, rating_cmp; // rating compare: 0 >= 1 == 2 <
+  uint32_t   labels;
+  char       createdate[20];
+  uint64_t   filetype;
+}
+dt_db_filter_t;
 
 typedef struct dt_db_t
 {
@@ -73,6 +87,7 @@ typedef struct dt_db_t
   dt_image_t *image;
   uint32_t image_cnt;
   uint32_t image_max;
+  threads_mutex_t image_mutex;
 
   // string pool for image file names
   dt_stringpool_t sp_filename;
@@ -81,8 +96,7 @@ typedef struct dt_db_t
 
   // current sort and filter criteria for collection
   dt_db_property_t collection_sort;
-  dt_db_property_t collection_filter;
-  uint64_t         collection_filter_val;
+  dt_db_filter_t   collection_filter;
 
   // current query
   uint32_t *collection;
@@ -127,7 +141,6 @@ dt_db_accept_filename(
          !strcasecmp(f2, ".nef") ||
          !strcasecmp(f2, ".pef") ||
          !strcasecmp(f2, ".raw") ||
-         !strcasecmp(f2, ".tif") ||
          !strcasecmp(f2, ".orf") ||
          !strcasecmp(f2, ".arw") ||
          !strcasecmp(f2, ".srw") ||
@@ -142,6 +155,7 @@ dt_db_accept_filename(
          !strcasecmp(f2, ".mlv") || // magic lantern raw video files
          !strcasecmp(f2, ".mov") || // videos
          !strcasecmp(f2, ".mp4") || // videos
+         !strcasecmp(f2, ".mcraw") || // motion cam raw video
          !strcasecmp(f2, ".cfg");   // also accept config files directly (preferrably so)
 }
 
@@ -189,3 +203,5 @@ void dt_db_current_set(dt_db_t *db, uint32_t colid);
 // internal storage anyways. this is all done at once by calling dt_gui_switch_collection,
 // which by separation of concerns also cares about the thumbnail creation (the db doesn't).
 void dt_db_duplicate_selected_images(dt_db_t *db);
+// convenience function to read create date of an image
+void dt_db_read_createdate(const dt_db_t *db, uint32_t imgid, char createdate[20]);

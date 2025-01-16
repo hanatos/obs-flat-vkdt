@@ -2,12 +2,12 @@
 
 #include "token.h"
 #include "alloc.h"
+#include "geo.h"
 
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 
 // info about a region of interest.
-// stores full buffer dimensions, context and roi.
 typedef struct dt_roi_t
 {
   uint32_t full_wd, full_ht; // full input size
@@ -24,6 +24,7 @@ typedef enum dt_connector_flags_t
   s_conn_feedback      = 4,  // this connection is only in between frames (written frame 1 and read frame 2)
   s_conn_dynamic_array = 8,  // dynamically allocated array connector, contents can change during animation
   s_conn_protected     = 16, // flag this connector for rewrites/accumulation/don't overwrite with other buffers
+  s_conn_double_buffer = 32, // this connector is double-buffered for async compute/display
 }
 dt_connector_flags_t;
 
@@ -81,6 +82,7 @@ typedef struct dt_connector_t
 
   // information about buffer dimensions transported here:
   dt_roi_t roi;
+  int max_wd, max_ht; // if > 0 will be used to clamp roi of sinks which don't implement their own roi callbacks.
 
   // if the output/write connector holds an array and the entries have different size:
   uint32_t     *array_dim;        // or 0 if all have the same size of the roi
@@ -119,10 +121,12 @@ dt_connector_t;
 // "templatised" connection functions for both modules and nodes
 typedef struct dt_graph_t dt_graph_t; // fwd declare
 // connect source|write (m0,c0) -> sink|read (m1,c1)
-int dt_module_connect (dt_graph_t *graph, int m0, int c0, int m1, int c1);
-int dt_module_feedback(dt_graph_t *graph, int m0, int c0, int m1, int c1);
-int dt_node_connect (dt_graph_t *graph, int n0, int c0, int n1, int c1);
-int dt_node_feedback(dt_graph_t *graph, int n0, int c0, int n1, int c1);
+#ifndef VKDT_DSO_BUILD
+VKDT_API int dt_module_connect (dt_graph_t *graph, int m0, int c0, int m1, int c1);
+VKDT_API int dt_module_feedback(dt_graph_t *graph, int m0, int c0, int m1, int c1);
+VKDT_API int dt_node_connect (dt_graph_t *graph, int n0, int c0, int n1, int c1);
+VKDT_API int dt_node_feedback(dt_graph_t *graph, int n0, int c0, int n1, int c1);
+#endif
 
 static inline int
 dt_connected(const dt_connector_t *c)
@@ -150,6 +154,8 @@ dt_connector_error_str(const int err)
     case 10: return "channels do not match";
     case 11: return "format does not match";
     case 12: return "connection would be cyclic";
+    case -100: return "named source connector does not exist";
+    case -101: return "named destination connector does not exist";
     default: return "";
   }
 }
@@ -177,6 +183,7 @@ dt_connector_bytes_per_channel(const dt_connector_t *c)
   if(c->format == dt_token("f16"))  return 2;
   if(c->format == dt_token("ui8"))  return 1;
   if(c->format == dt_token("u8"))   return 1;
+  if(c->format == dt_token("tri"))  return sizeof(geo_tri_t);
   return 0;
 }
 
@@ -197,7 +204,6 @@ dt_connector_bufsize(const dt_connector_t *c, uint32_t wd, uint32_t ht)
 {
   if(c->format == dt_token("bc1")) return wd/4*(uint64_t)ht/4 * (uint64_t)8;
   if(c->format == dt_token("yuv")) return wd*(uint64_t)ht * (uint64_t)2;
-  if(c->format == dt_token("geo")) return 4*sizeof(float); // just a dummy for extra data, ray tracing geo will take care of itself
   const int numc = dt_connector_channels(c);
   const size_t bpp = dt_connector_bytes_per_channel(c);
   return numc * bpp * wd * ht > 0 ? numc * bpp * wd * ht : 16;

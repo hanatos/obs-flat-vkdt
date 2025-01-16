@@ -161,11 +161,26 @@ compute_coefficients(
 
 void commit_params(dt_graph_t *graph, dt_module_t *module)
 {
+  const dt_image_params_t *img_param = dt_module_get_input_img_param(graph, module, dt_token("input"));
+  if(!img_param) return;
+  // mark image matrix from here on as rec2020/identity
+  module->img_param.cam_to_rec2020[0] = 1.0;
+  module->img_param.cam_to_rec2020[1] = 0.0;
+  module->img_param.cam_to_rec2020[2] = 0.0;
+  module->img_param.cam_to_rec2020[3] = 0.0;
+  module->img_param.cam_to_rec2020[4] = 1.0;
+  module->img_param.cam_to_rec2020[5] = 0.0;
+  module->img_param.cam_to_rec2020[6] = 0.0;
+  module->img_param.cam_to_rec2020[7] = 0.0;
+  module->img_param.cam_to_rec2020[8] = 1.0;
+  module->img_param.colour_primaries = s_colour_primaries_2020;
+  module->img_param.colour_trc       = s_colour_trc_linear;
+
   float *f = (float *)module->committed_param;
   uint32_t *i = (uint32_t *)module->committed_param;
 
   // grab params by name:
-  const float *p_wb  = dt_module_param_float(module, dt_module_get_param(module->so, dt_token("white")));
+        float *p_wb  = (float*)dt_module_param_float(module, dt_module_get_param(module->so, dt_token("white")));
   const float  p_tmp = dt_module_param_float(module, dt_module_get_param(module->so, dt_token("temp")))[0];
   const int    p_cnt = dt_module_param_int  (module, dt_module_get_param(module->so, dt_token("cnt")))[0];
   const float *p_map = dt_module_param_float(module, dt_module_get_param(module->so, dt_token("rbmap")));
@@ -175,6 +190,26 @@ void commit_params(dt_graph_t *graph, dt_module_t *module)
   const int    p_mod = dt_module_param_int  (module, dt_module_get_param(module->so, dt_token("mode")))[0];
   const float  p_sat = dt_module_param_float(module, dt_module_get_param(module->so, dt_token("sat")))[0];
   const int    p_pck = dt_module_param_int  (module, dt_module_get_param(module->so, dt_token("picked")))[0];
+  const int    p_clp = dt_module_param_int  (module, dt_module_get_param(module->so, dt_token("clip")))[0];
+  const float  p_clm = dt_module_param_float(module, dt_module_get_param(module->so, dt_token("clipmax")))[0];
+
+  if(p_wb[0] == 0.0f && p_wb[1] == 0.0f && p_wb[2] == 0.0f)
+  { // use camera coefs
+    float w0[3] = {0}, w[] = {
+      img_param->whitebalance[0],
+      img_param->whitebalance[1],
+      img_param->whitebalance[2]};
+    for(int j=0;j<3;j++) for(int i=0;i<3;i++)
+      w0[j] += img_param->cam_to_rec2020[3*j+i]/w[i];
+    w0[0] /= w0[1]; w0[2] /= w0[1]; w0[1] = 1.0f;
+    p_wb[0] = 1/w0[0];
+    p_wb[1] = 1;
+    p_wb[2] = 1/w0[2];
+  }
+  if(!(p_wb[0] == p_wb[0]) || p_wb[0] == 0.0f || p_wb[1] == 0.0f || p_wb[2] == 0.0f)
+  { // got no useful wb
+    p_wb[0] = p_wb[1] = p_wb[2] = 1.0f;
+  }
 
   // wb and exposure mul:
   f[0] = p_wb[0] / p_wb[1];
@@ -190,38 +225,36 @@ void commit_params(dt_graph_t *graph, dt_module_t *module)
   f[off+2] = p_sat;
   i[off+3] = p_pck;
   i[off+4] = p_gam;
+  i[off+5] = img_param->colour_primaries;
+  i[off+6] = img_param->colour_trc;
+  f[off+7] = p_clp ? p_clm : 0.0;
 
-  if(p_mat == 1 && !(module->img_param.cam_to_rec2020[0] > 0)) p_mat = 0; // no matrix? default to identity
   if(p_mat == 1)
   { // the one that comes with the image from the source node:
     for(int j=0;j<3;j++) for(int i=0;i<3;i++)
-      f[4+4*i+j] = module->img_param.cam_to_rec2020[3*j+i];
+      f[4+4*i+j] = img_param->cam_to_rec2020[3*j+i];
   }
   else if(p_mat == 2)
   { // CIE XYZ
-    const float xyz_to_rec2020[] = {
-      1.7166511880, -0.3556707838, -0.2533662814,
-     -0.6666843518,  1.6164812366,  0.0157685458,
-      0.0176398574, -0.0427706133,  0.9421031212};
-    for(int j=0;j<3;j++) for(int i=0;i<3;i++)
-      f[4+4*i+j] = xyz_to_rec2020[3*j+i];
+    i[off+5] = s_colour_primaries_XYZ;
+    i[off+6] = s_colour_trc_linear;
   }
   else if(p_mat == 3)
   { // rec709/linear srgb
-    const float rec709_to_rec2020[] = {
-      0.62750375, 0.32927542, 0.04330267,
-      0.06910828, 0.91951917, 0.0113596,
-      0.01639406, 0.08801128, 0.89538036};
-    for(int j=0;j<3;j++) for(int i=0;i<3;i++)
-      f[4+4*i+j] = rec709_to_rec2020[3*j+i];
+    i[off+5] = s_colour_primaries_srgb;
+    i[off+6] = s_colour_trc_linear;
   }
   else if(p_mat == 5)
   { // read what we have stored in params
+    i[off+5] = s_colour_primaries_custom;
+    i[off+6] = s_colour_trc_linear;
     for(int j=0;j<3;j++) for(int i=0;i<3;i++)
       f[4+4*i+j] = p_mtx[3*j+i];
   }
   else
   { // p_mat == 0 (or default) rec2020, identity matrix
+    i[off+5] = s_colour_primaries_2020;
+    i[off+6] = s_colour_trc_linear;
     for(int j=0;j<3;j++) for(int i=0;i<3;i++)
       f[4+4*j+i] = i==j ? 1.0f : 0.0f;
   }
@@ -262,7 +295,7 @@ void commit_params(dt_graph_t *graph, dt_module_t *module)
 
 int init(dt_module_t *mod)
 {
-  mod->committed_param_size = sizeof(float)*(4+12+4+12+4*24+4*24+5);
+  mod->committed_param_size = sizeof(float)*(4+12+4+12+4*24+4*24+5+8+1);
   return 0;
 }
 
@@ -273,58 +306,20 @@ void create_nodes(
   int have_clut = dt_connected(module->connector+2);
   int have_pick = dt_connected(module->connector+3);
   int have_abney = dt_connected(module->connector+4) && dt_connected(module->connector+5);
-  assert(graph->num_nodes < graph->max_nodes);
-  const int nodeid = graph->num_nodes++;
-  graph->node[nodeid] = (dt_node_t){
-    .name   = module->name,
-    .kernel = dt_token("main"), // file name
-    .module = module,
-    .wd     = module->connector[0].roi.wd,
-    .ht     = module->connector[0].roi.ht,
-    .dp     = 1,
-    .num_connectors = 6,
-    .connector = {{
-      .name   = dt_token("input"),
-      .type   = dt_token("read"),
-      .chan   = dt_token("rgba"),
-      .format = dt_token("f16"),
-      .roi    = module->connector[0].roi,
-      .connected_mi = -1,
-    },{
-      .name   = dt_token("output"),
-      .type   = dt_token("write"),
-      .chan   = dt_token("rgba"),
-      .format = dt_token("f16"),
-      .roi    = module->connector[1].roi,
-    },{
-      .name   = dt_token("clut"),
-      .type   = dt_token("read"),
-      .chan   = dt_token("rgba"),
-      .format = dt_token("f16"),
-      .connected_mi = -1,
-    },{
-      .name   = dt_token("picked"),
-      .type   = dt_token("read"),
-      .chan   = dt_token("r"),
-      .format = dt_token("atom"),
-      .roi    = module->connector[0].roi,
-      .connected_mi = -1,
-    },{
-      .name   = dt_token("abney"),
-      .type   = dt_token("read"),
-      .chan   = dt_token("rg"),
-      .format = dt_token("f16"),
-      .connected_mi = -1,
-    },{
-      .name   = dt_token("spectra"),
-      .type   = dt_token("read"),
-      .chan   = dt_token("rgba"),
-      .format = dt_token("f16"),
-      .connected_mi = -1,
-    }},
-    .push_constant_size = 3*sizeof(uint32_t),
-    .push_constant = { have_clut, have_pick, have_abney },
-  };
+  const int pc[] = { have_clut, have_pick, have_abney };
+  // we'll need the uint sampler in case there are no float atomics supported.
+  // but only if anything picked is connected at all. our dummy is f16 in any
+  // case and will run through the normal code with float atomics (there are no
+  // atomics here, we just read the buffer and need to know if it's uint or float)
+  const int nodeid = dt_node_add(graph, module, "colour",
+      (qvk.float_atomics_supported || !have_pick || (have_pick && module->connector[3].format != dt_token("atom"))) ? "main" : "main-",
+      module->connector[0].roi.wd, module->connector[0].roi.ht, 1, sizeof(pc), pc, 6,
+      "input",   "read",  "rgba", "f16",  dt_no_roi,
+      "output",  "write", "rgba", "f16",  &module->connector[0].roi,
+      "clut",    "read",  "rgba", "f16",  dt_no_roi,
+      "picked",  "read",  "r",    have_pick ? dt_token_str(module->connector[3].format) : "f16", dt_no_roi,
+      "abney",   "read",  "rg",   "f16",  dt_no_roi,
+      "spectra", "read",  "rgba", "f16",  dt_no_roi);
   dt_connector_copy(graph, module, 0, nodeid, 0);
   dt_connector_copy(graph, module, 1, nodeid, 1);
   if(have_clut)  dt_connector_copy(graph, module, 2, nodeid, 2);

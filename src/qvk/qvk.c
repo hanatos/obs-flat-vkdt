@@ -35,9 +35,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 qvk_t qvk =
 {
-  .win_width          = 1920,
-  .win_height         = 1080,
-  .frame_counter      = 0,
+  .frame_counter = 0,
 };
 
 #define _VK_EXTENSION_DO(a) PFN_##a q##a;
@@ -49,13 +47,19 @@ const char *vk_requested_layers[] = {
 };
 
 const char *vk_requested_instance_extensions[] = {
+  // colour management:
+  // VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME,
+  // debugging:
   VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
   VK_EXT_DEBUG_REPORT_EXTENSION_NAME,
+#ifdef __APPLE__
+  VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
+#endif
 };
 
 static const VkApplicationInfo vk_app_info = {
   .sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-  .pApplicationName   = "darktable ng",
+  .pApplicationName   = "vkdt",
   .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
   .pEngineName        = "vkdt",
   .engineVersion      = VK_MAKE_VERSION(1, 0, 0),
@@ -134,135 +138,10 @@ qvkDestroyDebugUtilsMessengerEXT(
   return VK_ERROR_EXTENSION_NOT_PRESENT;
 }
 
-VkResult
-qvk_create_swapchain()
-{
-  VkSwapchainKHR old_swap_chain = qvk.swap_chain;
-  QVKL(&qvk.queue_mutex, vkDeviceWaitIdle(qvk.device));
-
-  if(old_swap_chain)
-    for(int i = 0; i < qvk.num_swap_chain_images; i++)
-      vkDestroyImageView(qvk.device, qvk.swap_chain_image_views[i], 0);
-
-  /* create swapchain */
-  VkSurfaceCapabilitiesKHR surf_capabilities;
-  vkGetPhysicalDeviceSurfaceCapabilitiesKHR(qvk.physical_device, qvk.surface, &surf_capabilities);
-
-  uint32_t num_formats = 0;
-  vkGetPhysicalDeviceSurfaceFormatsKHR(qvk.physical_device, qvk.surface, &num_formats, NULL);
-  VkSurfaceFormatKHR *avail_surface_formats = alloca(sizeof(VkSurfaceFormatKHR) * num_formats);
-  vkGetPhysicalDeviceSurfaceFormatsKHR(qvk.physical_device, qvk.surface, &num_formats, avail_surface_formats);
-
-  dt_log(s_log_qvk, "available surface formats:");
-  for(int i = 0; i < num_formats; i++)
-    dt_log(s_log_qvk, qvk_format_to_string(avail_surface_formats[i].format));
-
-
-  VkFormat acceptable_formats[] = {
-    // VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_B8G8R8A8_SRGB,
-    VK_FORMAT_A2R10G10B10_UNORM_PACK32, VK_FORMAT_A2B10G10R10_UNORM_PACK32,
-    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM,
-    VK_FORMAT_R8G8B8_UNORM, VK_FORMAT_B8G8R8_UNORM,
-  };
-
-  for(int i = 0; i < LENGTH(acceptable_formats); i++) {
-    for(int j = 0; j < num_formats; j++)
-      if(acceptable_formats[i] == avail_surface_formats[j].format) {
-        qvk.surf_format = avail_surface_formats[j];
-        dt_log(s_log_qvk, "colour space: %u", qvk.surf_format.colorSpace);
-        goto out;
-      }
-  }
-out:;
-
-  uint32_t num_present_modes = 0;
-  vkGetPhysicalDeviceSurfacePresentModesKHR(qvk.physical_device, qvk.surface, &num_present_modes, NULL);
-  VkPresentModeKHR *avail_present_modes = alloca(sizeof(VkPresentModeKHR) * num_present_modes);
-  vkGetPhysicalDeviceSurfacePresentModesKHR(qvk.physical_device, qvk.surface, &num_present_modes, avail_present_modes);
-  qvk.present_mode = VK_PRESENT_MODE_FIFO_KHR; // guaranteed to be there, but has vsync frame time jitter
-
-  if(surf_capabilities.currentExtent.width != ~0u)
-  {
-    qvk.extent = surf_capabilities.minImageExtent;
-  }
-  else
-  {
-    qvk.extent.width  = MIN(surf_capabilities.maxImageExtent.width,  qvk.win_width);
-    qvk.extent.height = MIN(surf_capabilities.maxImageExtent.height, qvk.win_height);
-
-    qvk.extent.width  = MAX(surf_capabilities.minImageExtent.width,  qvk.extent.width);
-    qvk.extent.height = MAX(surf_capabilities.minImageExtent.height, qvk.extent.height);
-  }
-
-  // this is stupid, but it seems if the window manager does not allow going fullscreen
-  // it crashes otherwise. sometimes you need to first make the window floating in dwm
-  // before going F11 -> fullscreen works. sigh.
-  qvk.win_width  = qvk.extent.width;
-  qvk.win_height = qvk.extent.height;
-
-  uint32_t num_images = surf_capabilities.minImageCount;
-  if(surf_capabilities.maxImageCount > 0)
-    num_images = MIN(num_images, surf_capabilities.maxImageCount);
-
-  VkSwapchainCreateInfoKHR swpch_create_info = {
-    .sType                 = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-    .surface               = qvk.surface,
-    .minImageCount         = num_images,
-    .imageFormat           = qvk.surf_format.format,
-    .imageColorSpace       = qvk.surf_format.colorSpace,
-    .imageExtent           = qvk.extent,
-    .imageArrayLayers      = 1, /* only needs to be changed for stereoscopic rendering */ 
-    .imageUsage            = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
-                           | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-    .imageSharingMode      = VK_SHARING_MODE_EXCLUSIVE, /* VK_SHARING_MODE_CONCURRENT if not using same queue */
-    .queueFamilyIndexCount = 0,
-    .pQueueFamilyIndices   = NULL,
-    .preTransform          = surf_capabilities.currentTransform,
-    .compositeAlpha        = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, /* no alpha for window transparency */
-    .presentMode           = qvk.present_mode,
-    .clipped               = VK_FALSE, /* do not render pixels that are occluded by other windows */
-    .oldSwapchain          = old_swap_chain, /* need to provide previous swapchain in case of window resize */
-  };
-
-  QVKR(vkCreateSwapchainKHR(qvk.device, &swpch_create_info, NULL, &qvk.swap_chain));
-
-  vkGetSwapchainImagesKHR(qvk.device, qvk.swap_chain, &qvk.num_swap_chain_images, NULL);
-  assert(qvk.num_swap_chain_images <= QVK_MAX_SWAPCHAIN_IMAGES);
-  vkGetSwapchainImagesKHR(qvk.device, qvk.swap_chain, &qvk.num_swap_chain_images, qvk.swap_chain_images);
-
-  for(int i = 0; i < qvk.num_swap_chain_images; i++)
-  {
-    VkImageViewCreateInfo img_create_info = {
-      .sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-      .image      = qvk.swap_chain_images[i],
-      .viewType   = VK_IMAGE_VIEW_TYPE_2D,
-      .format     = qvk.surf_format.format,
-      .subresourceRange = {
-        .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
-        .baseMipLevel   = 0,
-        .levelCount     = 1,
-        .baseArrayLayer = 0,
-        .layerCount     = 1
-      }
-    };
-
-    QVKR(vkCreateImageView(qvk.device, &img_create_info, NULL, qvk.swap_chain_image_views + i));
-  }
-
-  if(old_swap_chain)
-    vkDestroySwapchainKHR(qvk.device, old_swap_chain, 0);
-
-  return VK_SUCCESS;
-}
-
 // this function works without gui and consequently does not init glfw
 VkResult
-qvk_init(const char *preferred_device_name, int preferred_device_id)
+qvk_init(const char *preferred_device_name, int preferred_device_id, int window)
 {
-  threads_mutex_init(&qvk.queue_mutex, 0);
-  threads_mutex_init(&qvk.queue_work0_mutex, 0);
-  threads_mutex_init(&qvk.queue_work1_mutex, 0);
-  /* layers */
   get_vk_layer_list(&qvk.num_layers, &qvk.layers);
 
   /* instance extensions */
@@ -283,6 +162,9 @@ qvk_init(const char *preferred_device_name, int preferred_device_id)
 #endif
     .enabledExtensionCount   = num_inst_ext_combined,
     .ppEnabledExtensionNames = (const char * const*)ext,
+#ifdef __APPLE__
+    .flags                   = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
+#endif
   };
 
   {
@@ -349,10 +231,14 @@ qvk_init(const char *preferred_device_name, int preferred_device_id)
       qvk.ticks_to_nanoseconds = dev_properties.limits.timestampPeriod;
       qvk.uniform_alignment    = dev_properties.limits.minUniformBufferOffsetAlignment;
       for(int k=0;k<num_ext;k++)
+      {
         if (!strcmp(ext_properties[k].extensionName, VK_KHR_RAY_QUERY_EXTENSION_NAME))
           qvk.raytracing_supported = 1;
         else if (!strcmp(ext_properties[k].extensionName, VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME))
           qvk.float_atomics_supported = 1;
+        else if (!strcmp(ext_properties[k].extensionName, VK_NV_COOPERATIVE_MATRIX_EXTENSION_NAME))
+          qvk.coopmat_supported = 1;
+      }
       picked_device = i;
       if(preferred_device_name)
         dt_log(s_log_qvk, "selecting device %s by explicit request", preferred_device_name);
@@ -402,10 +288,10 @@ qvk_init(const char *preferred_device_name, int preferred_device_id)
     return 1;
   }
 
-  float queue_priorities[3] = {1.0f};
+  float queue_priorities[s_queue_cnt] = {1.0f};
   VkDeviceQueueCreateInfo queue_create_info = {
     .sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-    .queueCount       = MIN(queue_cnt, 3),
+    .queueCount       = MIN(queue_cnt, s_queue_cnt),
     .pQueuePriorities = queue_priorities,
     .queueFamilyIndex = queue_family_index,
   };
@@ -441,48 +327,59 @@ qvk_init(const char *preferred_device_name, int preferred_device_id)
   VkPhysicalDeviceVulkan11Features v11f = {
     .sType                  = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
     .samplerYcbcrConversion = 1,
+    .pNext                  = qvk.float_atomics_supported ? (void *)&atomic_features : (void *)&v12f,
     // .pNext                  = &sub_features,
-    .pNext                  = &atomic_features,
   };
-  // vk 1.3 stuff:
   // VkPhysicalDeviceMaintenance4Features maintenance4 = {
   //   .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES,
   //   .pNext = &v11f,
   // };
+  VkPhysicalDeviceCooperativeMatrixFeaturesNV coopmat = {
+    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_NV,
+    // .pNext = &maintenance4, // VK 1.3 only so it seems
+    .pNext = &v11f,
+  };
   VkPhysicalDeviceFeatures2 device_features = {
     .sType    = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
     .features = dev_features,
-    // .pNext    = &maintenance4,
-    .pNext = &v11f,
+    .pNext    = qvk.coopmat_supported ? (void*)&coopmat : (void*)&v11f,
   };
   vkGetPhysicalDeviceFeatures2(qvk.physical_device, &device_features);
   // now find out whether we *really* support 32-bit floating point atomic adds:
   if(atomic_features.shaderImageFloat32AtomicAdd == VK_FALSE)
+  {
     qvk.float_atomics_supported = 0;
+    v11f.pNext = &v12f; // take the atomics out of the chain
+  }
 
-  dt_log(s_log_qvk, "picked device %d %s ray tracing and %s float atomics support", picked_device,
-      qvk.raytracing_supported ? "with" : "without",
-      qvk.float_atomics_supported ? "with" : "without");
+  dt_log(s_log_qvk, "picked device %d %s ray tracing and %s float atomics and %s coopmat support", picked_device,
+      qvk.raytracing_supported    ? "with" : "without",
+      qvk.float_atomics_supported ? "with" : "without",
+      qvk.coopmat_supported       ? "with" : "without");
 
   const char *requested_device_extensions[30] = {
     // ray tracing
+    VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME, // intel doesn't have it pre 2015 (hd 520)
     VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
     VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
-    VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME, // intel doesn't have it pre 2015 (hd 520)
     VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
     VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
     VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
     VK_KHR_RAY_QUERY_EXTENSION_NAME,
     // VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME, // to bring intel + amd in line with our 32-wide code..
     // end of ray tracing
-    // VK_NV_SHADER_SUBGROUP_PARTITIONED_EXTENSION_NAME, // ballot voting in work group
   };
-  int len = (qvk.raytracing_supported ? 7 : 0);
+  int len = (qvk.raytracing_supported ? 7 : 1);
   if(qvk.float_atomics_supported) requested_device_extensions[len++] = VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME;
+  if(qvk.coopmat_supported) requested_device_extensions[len++] = VK_NV_SHADER_SUBGROUP_PARTITIONED_EXTENSION_NAME;
+  if(qvk.coopmat_supported) requested_device_extensions[len++] = VK_NV_COOPERATIVE_MATRIX_EXTENSION_NAME;
 #ifdef QVK_ENABLE_VALIDATION
   requested_device_extensions[len++] = VK_EXT_DEBUG_MARKER_EXTENSION_NAME;
 #endif
-  if(qvk.window) requested_device_extensions[len++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+#ifdef __APPLE__
+  requested_device_extensions[len++] = VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME;
+#endif
+  if(window) requested_device_extensions[len++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
 
   VkDeviceCreateInfo dev_create_info = {
     .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -496,10 +393,19 @@ qvk_init(const char *preferred_device_name, int preferred_device_id)
   /* create device and queue */
   QVKR(vkCreateDevice(qvk.physical_device, &dev_create_info, NULL, &qvk.device));
 
-  vkGetDeviceQueue(qvk.device, qvk.queue_idx_graphics, 0, &qvk.queue_graphics);
-  vkGetDeviceQueue(qvk.device, qvk.queue_idx_compute,  0, &qvk.queue_compute);
-  vkGetDeviceQueue(qvk.device, qvk.queue_idx_work0,    MIN(queue_cnt-1, 1), &qvk.queue_work0);
-  vkGetDeviceQueue(qvk.device, qvk.queue_idx_work1,    MIN(queue_cnt-1, 2), &qvk.queue_work1);
+  for(int k=0;k<s_queue_cnt;k++)
+  {
+    qvk.queue[k].idx = MIN(queue_cnt-1, k);
+    qvk.qid[k] = qvk.queue[k].idx;
+    if(k == qvk.queue[k].idx)
+    { // new unique index, need to construct all the things
+      dt_log(s_log_qvk, "queue %d is idx %d family %d", k, qvk.qid[k], queue_family_index);
+      vkGetDeviceQueue(qvk.device, queue_family_index, qvk.queue[k].idx, &qvk.queue[k].queue);
+      threads_mutex_init(&qvk.queue[k].mutex, 0);
+      qvk.queue[k].family = queue_family_index;
+    }
+    else qvk.queue[k].idx = -1; // mark as not initialised
+  }
 
 #define _VK_EXTENSION_DO(a) \
     q##a = (PFN_##a) vkGetDeviceProcAddr(qvk.device, #a); \
@@ -507,8 +413,16 @@ qvk_init(const char *preferred_device_name, int preferred_device_id)
   _VK_EXTENSION_LIST
 #undef _VK_EXTENSION_DO
 
+#ifdef __APPLE__
+  VkPhysicalDevicePortabilitySubsetPropertiesKHR subprop = {
+    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_PROPERTIES_KHR,
+  };
+#endif
   VkPhysicalDeviceAccelerationStructurePropertiesKHR devprop_acc = {
     .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR,
+#ifdef __APPLE__
+    .pNext = &subprop,
+#endif
   };
   VkPhysicalDeviceProperties2 devprop = {
     .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
@@ -592,38 +506,25 @@ qvk_init(const char *preferred_device_name, int preferred_device_id)
   };
   QVKR(vkCreateSampler(qvk.device, &sampler_yuv_info, NULL, &qvk.tex_sampler_yuv));
 
-  // initialise a safe fallback for cli mode ("dspy" format is going to look here):
-  qvk.surf_format.format = VK_FORMAT_R8G8B8A8_UNORM;
-
-  return VK_SUCCESS;
-}
-
-static VkResult
-destroy_swapchain()
-{
-  for(int i = 0; i < qvk.num_swap_chain_images; i++)
-    vkDestroyImageView(qvk.device, qvk.swap_chain_image_views[i], NULL);
-
-  vkDestroySwapchainKHR(qvk.device, qvk.swap_chain, NULL);
   return VK_SUCCESS;
 }
 
 int
 qvk_cleanup()
 {
-  QVKL(&qvk.queue_mutex, vkDeviceWaitIdle(qvk.device));
-  threads_mutex_destroy(&qvk.queue_mutex);
-  threads_mutex_destroy(&qvk.queue_work0_mutex);
-  threads_mutex_destroy(&qvk.queue_work1_mutex);
+  for(int k=0;k<s_queue_cnt;k++)
+  {
+    if(qvk.queue[k].idx >= 0)
+    {
+      QVKL(&qvk.queue[k].mutex, vkQueueWaitIdle(qvk.queue[k].queue));
+      threads_mutex_destroy(&qvk.queue[k].mutex);
+    }
+  }
   vkDestroySampler(qvk.device, qvk.tex_sampler, 0);
   vkDestroySampler(qvk.device, qvk.tex_sampler_nearest, 0);
   vkDestroySampler(qvk.device, qvk.tex_sampler_yuv, 0);
   vkDestroySamplerYcbcrConversion(qvk.device, qvk.yuv_conversion, 0);
 
-  if(qvk.window)  destroy_swapchain();
-  if(qvk.surface) vkDestroySurfaceKHR(qvk.instance, qvk.surface, NULL);
-
-  vkDestroyCommandPool (qvk.device, qvk.command_pool,     NULL);
   vkDestroyDevice      (qvk.device,   NULL);
   QVK(qvkDestroyDebugUtilsMessengerEXT(qvk.instance, qvk.dbg_messenger, NULL));
   vkDestroyInstance    (qvk.instance, NULL);

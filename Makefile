@@ -4,7 +4,15 @@
 # also handles some global settings for compilers and debug flags.
 
 .PHONY:all src clean distclean bin install release cli
+ifeq ($(OS),Windows_NT)
+include bin/config.mk.defaults.w64
+else
+ifeq ($(shell uname),Darwin)
+include bin/config.mk.defaults.osx
+else
 include bin/config.mk.defaults
+endif
+endif
 sinclude bin/config.mk
 
 # dr dobb's idea about makefile debugging:
@@ -17,22 +25,33 @@ all: src bin
 
 prefix?=/usr
 DESTDIR?=
+ifeq ($(OS),Windows_NT)
+VKDTDIR?=$(shell cygpath -u $(DESTDIR)$(prefix)/lib/vkdt)
+else
 VKDTDIR?=$(DESTDIR)$(prefix)/lib/vkdt
+endif
 VKDTLIBDIR?=$(DESTDIR)$(prefix)/lib
 VKDTINCDIR?=$(DESTDIR)$(prefix)/include/vkdt
 install-bin: all Makefile
 	mkdir -p $(VKDTDIR)/lib
 	mkdir -p $(DESTDIR)$(prefix)/bin
-	ln -rsf ${VKDTDIR}/vkdt $(DESTDIR)$(prefix)/bin/vkdt
-	ln -rsf ${VKDTDIR}/vkdt-cli $(DESTDIR)$(prefix)/bin/vkdt-cli
+	ln -rsf ${VKDTDIR}/vkdt $(DESTDIR)$(prefix)/bin/vkdt || true
+	ln -rsf ${VKDTDIR}/vkdt-cli $(DESTDIR)$(prefix)/bin/vkdt-cli || true
 	cp -rfL bin/vkdt ${VKDTDIR}
 	cp -rfL bin/vkdt-cli ${VKDTDIR}
+	cp -rfL bin/exiftool ${VKDTDIR}
 	cp -rfL bin/vkdt-mkssf bin/vkdt-mkclut bin/vkdt-fit ${VKDTDIR}
 	cp -rfL bin/vkdt-eval-profile bin/vkdt-lutinfo ${VKDTDIR}
 	cp -rfL bin/vkdt-noise-profile bin/vkdt-gallery bin/vkdt-read-icc ${VKDTDIR}
-	cp -rfL bin/darkroom.ui ${VKDTDIR}
+	cp -rfL bin/darkroom.ui bin/style.txt ${VKDTDIR}
+ifneq ($(OS), Windows_NT)
+ifeq ($(shell uname),Linux)
+	cp -rfL vkdt.png $(DESTDIR)$(prefix)/share/icons/
+	cp -rfL vkdt.desktop $(DESTDIR)$(prefix)/share/applications/
+endif
+endif
 
-install-mod: lib bin Makefile
+install-mod: bin Makefile
 	mkdir -p $(VKDTDIR)/modules
 	rsync -avP --include='**/params' --include='**/connectors' --include='**/*.ui' --include='**/ptooltips' --include='**/ctooltips' --include='**/readme.md' --include='**.spv' --include='**.so' --include '*/' --exclude='**' bin/modules/ ${VKDTDIR}/modules/
 	cp -rfL bin/data ${VKDTDIR}
@@ -42,7 +61,7 @@ install: install-bin install-mod Makefile
 
 src/core/version.h: $(wildcard .git/FETCH_HEAD)
 	@echo "#pragma once" > src/core/version.h
-	@echo "#define VKDT_VERSION \"$(shell git describe --tags)\"" >> src/core/version.h
+	@echo "#define VKDT_VERSION \"$(shell git describe)\"" >> src/core/version.h
 
 install-lib: install-mod Makefile src/core/version.h
 	mkdir -p $(VKDTINCDIR)/qvk
@@ -60,7 +79,12 @@ install-lib: install-mod Makefile src/core/version.h
 
 RELEASE_FILES=$(shell echo src/core/version.h; git ls-files --recurse-submodules)
 ifeq ($(VKDT_USE_RAWINPUT), 1)
-  RELEASE_FILES+=$(shell cd src/pipe/modules/i-raw/rawspeed && git ls-files | sed -e 's#^#src/pipe/modules/i-raw/rawspeed/#')
+  RAWSPEED_DIR=$(shell ls -d src/pipe/modules/i-raw/rawspeed-*)
+  RELEASE_FILES+=$(shell cd $(RAWSPEED_DIR) && git ls-files | sed -e 's#^#$(RAWSPEED_DIR)/#')
+endif
+ifeq ($(VKDT_USE_MCRAW), 1)
+  MCRAW_DIR=$(shell ls -d src/pipe/modules/i-mcraw/mcraw-*)
+  RELEASE_FILES+=$(shell cd $(MCRAW_DIR) && git ls-files | sed -e 's#^#$(MCRAW_DIR)/#')
 endif
 ifeq ($(VKDT_USE_QUAKE), 1)
   RELEASE_FILES+=$(shell cd src/pipe/modules/quake/quakespasm; git ls-files | sed -e 's#^#src/pipe/modules/quake/quakespasm/#')
@@ -94,11 +118,11 @@ reload-shaders: Makefile
 
 CLI=../bin/vkdt-cli ../bin/vkdt-fit
 cli: Makefile bin src/core/version.h
-	$(MAKE) -C src/ ${CLI} tools modules
+	$(MAKE) -C src/ $(CLI) tools modules
 
 LIB=../bin/libvkdt.so
 lib: Makefile bin src/core/version.h
-	$(MAKE) -C src/ ${LIB} modules
+	$(MAKE) -C src/ $(LIB) modules
 
 clean:
 	$(MAKE) -C src/ clean
@@ -122,4 +146,8 @@ uninstall-lib:
 
 bin: Makefile
 	mkdir -p bin/data
+ifeq ($(OS),Windows_NT)
+	cp -rf src/pipe/modules bin/
+else
 	ln -sf ../src/pipe/modules bin/
+endif

@@ -16,6 +16,34 @@
 
 #include "global.h"
 #include "connector.h"
+#include "metadata.h"
+
+typedef enum dt_colour_primaries_t
+{
+  s_colour_primaries_custom = 0, // use cam_to_rec2020
+  s_colour_primaries_srgb   = 1,
+  s_colour_primaries_2020   = 2, // = 2100
+  s_colour_primaries_adobe  = 3,
+  s_colour_primaries_P3     = 4,
+  s_colour_primaries_XYZ    = 5,
+  s_colour_primaries_unknown = 0xffff, // signal that we don't know and can be overwritten
+}
+dt_colour_primaries_t;
+
+typedef enum dt_colour_trc_t
+{
+  s_colour_trc_linear = 0,
+  s_colour_trc_709    = 1, // SMPTE RP 431-2
+  s_colour_trc_srgb   = 2, // IEC 61966-2-1 sRGB
+  s_colour_trc_PQ     = 3, // SMPTE ST 2084
+  s_colour_trc_DCI    = 4, // SMPTE ST 428-1
+  s_colour_trc_HLG    = 5, // Rec. ITU-R BT.2100-1 (HLG)
+  s_colour_trc_gamma  = 6, //
+  s_colour_trc_mclog  = 7, // mcraw log
+  s_colour_trc_unknown = 0xffff,
+}
+dt_colour_trc_t;
+
 
 // bare essential meta data that travels
 // with a (raw) input buffer along the graph.
@@ -42,6 +70,10 @@ typedef struct dt_image_params_t
   float    iso;               // iso value as shot
   float    focal_length;      // focal length of lens
 
+  // colour info as defined in dt_colour_primaries_t and dt_colour_trc_t
+  int colour_primaries;       // these describe the current image buffer and may change
+  int colour_trc;             // as the data travels through the graph
+
   // audio information (from ffmpeg or mlv or game code)
   int snd_format;             // see alsa's snd_pcm_format_t
   int snd_channels;           // 0 1 2..
@@ -51,16 +83,22 @@ typedef struct dt_image_params_t
   float noise_a;              // raw noise estimate, gaussian part
   float noise_b;              // raw noise estimate, poissonian part
   dt_token_t input_name;      // remember the name, "main" has special rights
+
+  // optional extra data to travel along with the image until the output:
+  dt_image_metadata_t *meta;  // owned by the i-* module that sets it
 }
 dt_image_params_t;
 
 // a keyframe param change
 typedef struct dt_keyframe_t
 {
-  dt_token_t param;     // the parameter name
-  int        frame;     // the frame to apply this
-  uint32_t   beg, end;  // the begin and end byte offsets in the params array
-  uint8_t   *data;      // the data to slap over. points into the graph's param pool.
+  dt_token_t     param;     // the parameter name
+  int            frame;     // the frame to apply this
+  uint32_t       beg, end;  // the begin and end byte offsets in the params array
+  uint8_t       *data;      // the data to slap over. points into the graph's param pool.
+  // if this keyframe is hooked into the acceleration structure per param,
+  // module->param_keyframe, this is a linked list sorted by frame.
+  struct dt_keyframe_t *next; 
 }
 dt_keyframe_t;
 
@@ -103,6 +141,8 @@ typedef struct dt_module_t
   uint64_t       keyframe_size; // allocation size
   dt_keyframe_t *keyframe;      // dynamically allocated keyframe array
 
+  uint16_t param_keyframe[DT_MAX_PARAMS_PER_MODULE]; // index to the first keyframe in the array corresponding to the parameter id
+
   // these stay 0 unless inited by the module in init().
   // if the module implements commit_params(), it shall be used
   // to fill this block, which will then be uploaded as uniform
@@ -126,13 +166,15 @@ dt_module_t;
 
 typedef struct dt_graph_t dt_graph_t; // fwd declare
 
-// add a module to the graph, also init the dso class. returns the module id or -1.
-int dt_module_add(dt_graph_t *graph, dt_token_t name, dt_token_t inst);
-
 int dt_module_get_connector(const dt_module_t *m, dt_token_t conn);
 
+#ifndef VKDT_DSO_BUILD
+// add a module to the graph, also init the dso class. returns the module id or -1.
+VKDT_API int dt_module_add(dt_graph_t *graph, dt_token_t name, dt_token_t inst);
+
 // remove module from the graph
-int dt_module_remove(dt_graph_t *graph, const int modid);
+VKDT_API int dt_module_remove(dt_graph_t *graph, const int modid);
+#endif
 
 // convenience functions for simple cases where the graph degenerates to
 // a simple linear chain of "output" being plugged into "input" connectors.
@@ -151,3 +193,5 @@ int dt_module_get_module_after(
 
 // reset all parameters to their defaults
 void dt_module_reset_params(dt_module_t *mod);
+// update keyframe acceleration structure param_keyframe based on a keyframe change
+void dt_module_keyframe_post_update(dt_module_t *mod);

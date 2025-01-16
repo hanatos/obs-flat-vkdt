@@ -14,6 +14,7 @@ dt_tool_print_usage()
                   "vkdt eval-profile  -- evaluate a clut profile\n"
                   "vkdt gallery       -- create a static web gallery from jpg\n"
                   "vkdt read-icc      -- create a display profile from matrix icc\n"
+                  "vkdt scanin        -- create a preset for an argyll .cht target file\n"
                   "vkdt noise-profile -- create a noise profile for a given raw\n");
 }
 
@@ -27,13 +28,17 @@ dt_tool_dispatch(int argc, char *argv[])
   fs_basedir(basedir, sizeof(basedir));
   const char *cmd = 0;
   const char *cmds[] = {
-    "cli", "eval-profile", "fit", "lutinfo", "mkclut", "mkssf", "gallery", "noise-profile", "read-icc",
+    "cli", "eval-profile", "fit", "lutinfo", "mkclut", "mkssf", "gallery", "noise-profile", "read-icc", "scanin"
   };
   for(int i=0;i<sizeof(cmds)/sizeof(cmds[0]);i++)
     if(!strcmp(argv[1], cmds[i])) { cmd = cmds[i]; break; }
   if(!cmd) return; // no such tool
   char filename[256];
-  snprintf(filename, sizeof(filename), "%s/vkdt-%s", basedir, cmd);
+  if(snprintf(filename, sizeof(filename), "%s/vkdt-%s", basedir, cmd) >= sizeof(filename))
+    goto error;
   if(execv(filename, argv+1) < 0)
-    fprintf(stderr, "[vkdt] dispatch tool: failed to execute %s\n", filename);
+    goto error;
+  return; // never reached
+error:
+  fprintf(stderr, "[vkdt] dispatch tool: failed to execute %s\n", filename);
 }
